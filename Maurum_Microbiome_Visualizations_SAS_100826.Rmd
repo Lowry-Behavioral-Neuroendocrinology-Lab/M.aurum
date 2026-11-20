@@ -1,0 +1,5093 @@
+---
+title: "Maurum Analysis"
+author: Saydie Sago, adapted from "Heather Deel" 2025-05-14 and Lyanna Kessler 2023-09-22  
+date: "2025-08-20, edited 061526, edited 110926 for another round of manuscript revisions
+output:html_document: default
+---
+
+# This script was modeled by Heather Deel's script for the QIIME2 microbiome workshop on 5/14/25 and 6/10-12/25 and have taken aspects of Lyanna Kessler's script from the Desmond et. al., 2025 publication to generate the M.aurum microbiome analysis. I started working on the OnDemand RC Colorado (version 3.1.14) Rstudio server on "Interactive Session" tab. The latest RStudio version OnDemand RC uses is 2024.04.2 R 4.4.1, and I selected 1 Core, 12 hours settings. Note as a reminder for CU Boulder students, you need your Identikey and password to login into OnDemand RC. If you don't want to use OnDemand RC, you can run this Rmd thorugh Rstudio on your desktop. 
+
+#I had to switch over Rstudio on my desktop on 8/27/25 later during my analysis. OnDemand RC cannot download all microbiome analysis packages (e.g. microbiomeMarker and devtools) needed for complex analysis and Lowry lab approved. OnDemand RC has restrictions to add new directories to your RC account. Take home message, OnDemand RC uses basic microbiome packages, but if you are doing more an extensive analyses that need specific and special packages on GitHub, then work on your desktop :)  
+
+# AMCOM-BC package version 2.10.1: prevalence cutoff (0.10); alpha sensitivity (0.05); pseudo-count sensitivity (TRUE, 0.1, 0.5, 1); p_adj_method "BH" (less strict)
+
+# References
+# Hex codes for M.aurum publication: BBS/HC = #B3E1F0, BBS/IS = #148CBA, Maurum/HC = #98E0B1, Maurum/IS = #21A951
+
+################################################################################
+# Installing and loading packages
+################################################################################
+
+## Install special packages for microbiome analysis and generating clean figures if it's not in your libary and the first time going through this script. Note it can take awhile.
+```{r}
+# Some packages are going to be installed via github/biocmanager or devtools 
+remotes::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis", force = T)
+remotes::install_github("phytomosaic/ecole")
+remotes::install_github("joey711/phyloseq")
+remotes::install_github("KarstensLab/microshades", dependencies = TRUE)
+remotes::install_github("yiluheihei/microbiomeMarker")
+remotes::install_github("taryue/GMDecomp")
+remotes::install_github("phytomosaic/ecole")
+BiocManager::install("philr")
+BiocManager::install("ggtree")
+BiocManager::install("microbiomeMarker") #cannot install because OnDemand RC cannot make a new R directory! 
+BiocManager::install("ANCOMBC")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("maaslin3")
+devtools::install_github("jbisanz/qiime2R")
+devtools::install_github("kylebittinger/usedist")
+devtools::install_github("microbiome/microbiome")
+```
+
+## Upload packages 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+skoden_packages <- c("tidyverse",
+                   "data.table",
+                   "ggplot2",
+                   "phyloseq",
+                   "patchwork",
+                   "microshades",
+                   "cowplot",
+                   "magrittr",
+                   "qiime2R",
+                   "vegan",
+                   "microbiomeMarker",
+                   "BiocManager",
+                   "ANCOMBC",
+                   "GMDecomp",
+                   "ape",
+                   "usedist",
+                   "lme4",
+                   "ellipse", 
+                   "ggrepel",
+                   "EnhancedVolcano",
+                   "biomformat",
+                   "ggdist",
+                   "pairwiseAdonis",
+                   "seqinr",
+                   "plotrix",
+                   "ggthemes",
+                   "glmnet",
+                   "ggtree",
+                   "philr",
+                   "ggpubr", 
+                    "tibble", 
+                    "stringr", 
+                    "forcats", 
+                    "microbiome",
+                    "svglite", 
+                    "systemfonts", 
+                    "Rmisc",
+                    "openxlsx",
+                    "magick",
+                    "emmeans",
+                    "ggh4x")
+
+lapply(skoden_packages, library, character.only=TRUE)
+#install.packages("car") # needed to update car package on my computer, if you do, say no to "install from sources the packages which need compilation"
+#"ecole" package does not exist and built for another older version of Rstudio 
+```
+################################################################################
+# Alpha diversity
+################################################################################
+## Import alpha diversity data from QIIME2 output
+```{r}
+# import vectors exported from QIIME2
+faith_pd <- read_tsv("output_for_R/faith_pd_vector.tsv")
+evenness <- read_tsv("output_for_R/evenness_vector.tsv")
+shannon <- read_tsv("output_for_R/shannon_vector.tsv")
+obs_feats <- read_tsv("output_for_R/observed_features_vector.tsv")
+
+# change sample ID column names
+colnames(faith_pd) <- c("SampleID","faith_pd")
+colnames(evenness) <- c("SampleID","pielou_evenness")
+colnames(shannon) <- c("SampleID","shannon_entropy")
+colnames(obs_feats) <- c("SampleID","observed_features")
+
+# merge vectors by sample ID
+alpha_div <- faith_pd %>% 
+  left_join(evenness, by = "SampleID") %>% 
+  left_join(shannon, by = "SampleID") %>% 
+  left_join(obs_feats, by = "SampleID")
+
+# what are we missing from this data frame? metadata!
+metadata <- read_tsv("Maurum_metadata_all.tsv")
+
+alpha_div_metadata <- alpha_div %>% 
+  left_join(metadata, by = "SampleID")
+
+```
+## Statistical Analysis: 2x2 ANOVA for Faiths, Evenness, Entropy, OTUS
+```{r}
+alpha_div_metadata$treatment <- as.factor(alpha_div_metadata$treatment)
+alpha_div_metadata$condition <- as.factor(alpha_div_metadata$condition)
+alpha_div_metadata$experimentalgroup <- as.factor(alpha_div_metadata$experimental_group)
+
+# Run two-way ANOVA for Faith's PD
+aov1 <- aov(faith_pd ~ treatment * condition, data = alpha_div_metadata)
+
+# Extract the summary table
+anova_table1 <- summary(aov1)[[1]]
+
+# Pull the p-values
+p_treatment_faith       <- anova_table1["treatment", "Pr(>F)"]
+p_condition_faith  <- anova_table1["condition", "Pr(>F)"]
+p_interaction_faith <- anova_table1["treatment:condition", "Pr(>F)"]
+
+# Make a nice label string
+p_label_faith <- paste0("treatment p = ", signif(p_treatment_faith, 3),
+                  "\ncondition p = ", signif(p_condition_faith, 3),
+                  "\ninteraction p = ", signif(p_interaction_faith, 3))
+
+# Run two-way ANOVA for Pielou Evenness 
+aov2 <- aov(pielou_evenness ~ treatment * condition, data = alpha_div_metadata)
+
+# Extract the summary table
+anova_table2 <- summary(aov2)[[1]]
+
+# Pull the p-values
+p_treatment_evenness      <- anova_table2["treatment", "Pr(>F)"]
+p_condition_evenness  <- anova_table2["condition", "Pr(>F)"]
+p_interaction_evenness <- anova_table2["treatment:condition", "Pr(>F)"]
+
+# Make a nice label string
+p_label_evenness <- paste0("treatment p = ", signif(p_treatment_evenness, 3),
+                  "\ncondition p = ", signif(p_condition_evenness, 3),
+                  "\ninteraction p = ", signif(p_interaction_evenness, 3))
+
+
+# Run two-way ANOVA for Shannon Diversity  
+aov3 <- aov(shannon_entropy ~ treatment * condition, data = alpha_div_metadata)
+
+# Extract the summary table
+anova_table3 <- summary(aov3)[[1]]
+
+# Pull the p-values
+p_treatment_shannon       <- anova_table3["treatment", "Pr(>F)"]
+p_condition_shannon  <- anova_table3["condition", "Pr(>F)"]
+p_interaction_shannon <- anova_table3["treatment:condition", "Pr(>F)"]
+
+# Make a nice label string
+p_label_shannon <- paste0("treatment p = ", signif(p_treatment_shannon, 3),
+                  "\ncondition p = ", signif(p_condition_shannon, 3),
+                  "\ninteraction p = ", signif(p_interaction_shannon, 3))
+
+# Run two-way ANOVA for OTUS
+aov4 <- aov(observed_features ~ treatment * condition, data = alpha_div_metadata)
+
+# Extract the summary table
+anova_table4 <- summary(aov4)[[1]]
+
+# Pull the p-values
+p_treatment_otus       <- anova_table4["treatment", "Pr(>F)"]
+p_condition_otus  <- anova_table4["condition", "Pr(>F)"]
+p_interaction_otus <- anova_table4["treatment:condition", "Pr(>F)"]
+
+# Make a nice label string
+p_label_otus <- paste0("treatment p = ", signif(p_treatment_otus, 3),
+                  "\ncondition p = ", signif(p_condition_otus, 3),
+                  "\ninteraction p = ", signif(p_interaction_otus, 3))
+
+summary_faithpd <- alpha_div_metadata %>%
+  group_by(experimental_group) %>%
+  summarise(
+    n = sum(!is.na(faith_pd)),
+    mean = mean(faith_pd, na.rm = TRUE),
+    sd = sd(faith_pd, na.rm = TRUE),
+    se = sd / sqrt(n),
+    .groups = "drop"
+  )
+summary_faithpd
+
+summary_evenness <- alpha_div_metadata %>%
+  group_by(experimental_group) %>%
+  summarise(
+    n = sum(!is.na(pielou_evenness)),
+    mean = mean(pielou_evenness, na.rm = TRUE),
+    sd = sd(pielou_evenness, na.rm = TRUE),
+    se = sd / sqrt(n),
+    .groups = "drop"
+  )
+summary_evenness
+
+summary_shannon <- alpha_div_metadata %>%
+  group_by(experimental_group) %>%
+  summarise(
+    n = sum(!is.na(shannon_entropy)),
+    mean = mean(shannon_entropy, na.rm = TRUE),
+    sd = sd(shannon_entropy, na.rm = TRUE),
+    se = sd / sqrt(n),
+    .groups = "drop"
+  )
+summary_shannon
+
+summary_otus <- alpha_div_metadata %>%
+  group_by(experimental_group) %>%
+  summarise(
+    n = sum(!is.na(observed_features)),
+    mean = mean(observed_features, na.rm = TRUE),
+    sd = sd(observed_features, na.rm = TRUE),
+    se = sd / sqrt(n),
+    .groups = "drop"
+  )
+summary_otus
+
+
+# Making ANOVA table- per Lowry's request 
+extract_anova <- function(aov_model, metric_name){
+
+  tab <- summary(aov_model)[[1]]
+
+  data.frame(
+    Metric = metric_name,
+    Effect = rownames(tab)[1:3],
+    Df1 = tab[1:3, "Df"],
+    Df2 = tab["Residuals", "Df"],
+    F = tab[1:3, "F value"],
+    P = tab[1:3, "Pr(>F)"]
+  )
+}
+
+anova_table_pub <- bind_rows(
+  extract_anova(aov1, "Faith's PD"),
+  extract_anova(aov2, "Pielou Evenness"),
+  extract_anova(aov3, "Shannon Entropy"),
+  extract_anova(aov4, "Observed Features")
+) %>%
+  mutate(
+    F = round(F, 3),
+    P = signif(P, 3)
+  )
+
+anova_table_pub
+
+# Making summary tables 
+alpha_summary_groups <- alpha_div_metadata %>%
+  dplyr::group_by(experimental_group) %>%
+  dplyr::summarise(
+    sample_size = sum(!is.na(shannon_entropy)),
+
+    observed_mean = mean(observed_features, na.rm = TRUE),
+    observed_se = sd(observed_features, na.rm = TRUE) / sqrt(sample_size),
+
+    shannon_mean = mean(shannon_entropy, na.rm = TRUE),
+    shannon_se = sd(shannon_entropy, na.rm = TRUE) / sqrt(sample_size),
+
+    pielou_mean = mean(pielou_evenness, na.rm = TRUE),
+    pielou_se = sd(pielou_evenness, na.rm = TRUE) / sqrt(sample_size),
+
+    faith_mean = mean(faith_pd, na.rm = TRUE),
+    faith_se = sd(faith_pd, na.rm = TRUE) / sqrt(sample_size),
+
+    .groups = "drop"
+  )
+
+alpha_summary_groups
+```
+## Make figure- Treatment Supplementary materials (S1)
+```{r}
+# Wilcoxon test:	Compare two groups (non-parametric)
+# Kruskal-Wallis: Compare multiple groups (non-parametric)
+# Two-Way ANOVA: continuous data and there is only one collection point(parametric)
+
+# rebuild safely from Treatment + Condition
+alpha_div_metadata$experimental_group <- paste0(
+  tolower(as.character(alpha_div_metadata$treatment)),
+  ".",
+  as.character(alpha_div_metadata$condition)
+)
+
+# order + relabel groups
+alpha_div_metadata$experimental_group <- factor(
+  alpha_div_metadata$experimental_group,
+  levels = c("bbs.HC", "bbs.IS", "maurum.HC", "maurum.IS"),
+  labels = c("BBS/HC", "BBS/IS", "M. aurum/HC", "M. aurum/IS")
+)
+
+group_colors <- c(
+  "BBS/HC" = "#B3E1F0",
+  "BBS/IS" = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+
+alpha_theme <- theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 20, face = "bold"),
+    legend.text = element_text(size = 18),
+    legend.key.size = unit(0.6, "cm"),
+    axis.title.y = element_text(size = 20, face = "bold"),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 20, angle = 28, hjust = 1),
+    axis.text.y = element_text(size = 20),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5)
+)
+
+sample_type_faith <- ggplot(alpha_div_metadata, aes(x = experimental_group, y = faith_pd, fill = experimental_group)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(width = 0.12, size = 2.2, alpha = 0.9) +
+  scale_fill_manual(
+  values = group_colors,
+  name = "Treatment",
+  labels = c(
+    "BBS/HC",
+    "BBS/IS",
+    expression(italic("M. aurum") ~ "/HC"),
+    expression(italic("M. aurum") ~ "/IS")
+  )
+) +
+  scale_x_discrete(
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum") ~ "/HC"),
+      expression(italic("M. aurum") ~ "/IS")
+    )
+  ) +
+  ylab(NULL) +
+  labs(title = "Faith's phylogenetic diversity") +
+theme(plot.title = element_text(size = 16,face = "bold", hjust = 0.5)) +
+  alpha_theme
+
+sample_type_evenness <- ggplot(alpha_div_metadata, aes(x = experimental_group, y = pielou_evenness, fill = experimental_group)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(width = 0.12, size = 2.2, alpha = 0.9) +
+  scale_fill_manual(
+  values = group_colors,
+  name = "Treatment",
+  labels = c(
+    "BBS/HC",
+    "BBS/IS",
+    expression(italic("M. aurum") ~ "/HC"),
+    expression(italic("M. aurum") ~ "/IS")
+  )
+) +
+  scale_x_discrete(
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum") ~ "/HC"),
+      expression(italic("M. aurum") ~ "/IS")
+    )
+  ) +
+   ylab(NULL) +
+  labs(title = "Pielou's evenness") +
+theme(plot.title = element_text(size = 16,face = "bold", hjust = 0.5)) +
+  alpha_theme
+
+sample_type_shannon <- ggplot(alpha_div_metadata, aes(x = experimental_group, y = shannon_entropy, fill = experimental_group)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(width = 0.12, size = 2.2, alpha = 0.9) +
+  scale_fill_manual(
+  values = group_colors,
+  name = "Treatment",
+  labels = c(
+    "BBS/HC",
+    "BBS/IS",
+    expression(italic("M. aurum") ~ "/HC"),
+    expression(italic("M. aurum") ~ "/IS")
+  )
+) +
+  scale_x_discrete(
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum") ~ "/HC"),
+      expression(italic("M. aurum") ~ "/IS")
+    )
+  ) +
+   ylab(NULL) +
+  labs(title = "Shannon diversity") +
+theme(plot.title = element_text(size = 16,face = "bold", hjust = 0.5)) +
+  alpha_theme
+
+
+# Adding significant brackets for Treatment (BBS vs. M. aurum)
+add_treatment_sig <- function(plot, variable, p_value) {
+
+# Determine significance symbol
+  sig_label <- if (p_value < 0.001) {
+    "***"
+  } else if (p_value < 0.01) {
+    "**"
+  } else if (p_value < 0.05) {
+    "*"
+  } else {
+    "ns"
+  }
+
+# Get the data range for bracket positioning
+  y_range <- range(
+    alpha_div_metadata[[variable]],
+    na.rm = TRUE)
+  y_max <- max(y_range)
+  y_span <- diff(y_range)
+
+# Position bracket above data
+  y_pos <- y_max + 0.10 * y_span
+
+# Add bracket and significance label
+  plot +
+  # Horizontal bracket
+    annotate(
+      "segment",
+      x = 1,
+      xend = 3,
+      y = y_pos,
+      yend = y_pos,
+      linewidth = 0.6) +
+
+  # Vertical ends of bracket
+    annotate(
+      "segment",
+      x = c(1, 3),
+      xend = c(1, 3),
+      y = y_pos - 0.03 * y_span,
+      yend = y_pos,
+      linewidth = 0.6) +
+
+  # Significance annotation
+    annotate(
+      "text",
+      x = 2,
+      y = y_pos + 0.05 * y_span,
+      label = paste(sig_label),
+      size = 7) +
+
+  # Provide room above the boxplots
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(0.05, 0.25)))
+}
+
+# Adding p-value to figures
+sample_type_shannon <- add_treatment_sig(
+  sample_type_shannon,
+  variable = "shannon_entropy",
+  p_value = 0.00841)
+
+sample_type_evenness <- add_treatment_sig(
+  sample_type_evenness,
+  variable = "pielou_evenness",
+  p_value = 0.00708)
+
+sample_type_faith <- add_treatment_sig(
+  sample_type_faith,
+  variable = "faith_pd",
+  p_value = 0.02410)
+
+# Merging figure with panel letters 
+alpha_supp_fig <- ggpubr::ggarrange(
+  sample_type_shannon,
+  sample_type_evenness,
+  sample_type_faith,
+  labels = c("a", "b", "c"),
+  ncol = 3,
+  nrow = 1,
+  align = "v",
+  font.label = list(
+    size = 25,
+    face = "bold"),
+  label.x = 0.01,
+  label.y = 1.01,
+  common.legend = TRUE,
+  legend = "bottom")
+
+ggsave(
+  filename = "R_figures/alpha_div_supp_S1.tiff",
+  plot = alpha_supp_fig,
+  device = "tiff",
+  width = 15,
+  height = 8,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+# New notes: There's a main effect of treatment doing the 2x2 ANOVA! Old notes: Treatment did not see any significance, but Dr. Lowry is very interesting in the interactions of HC and IS on 082725. Continue analyzing these comparisons for the generating the figures.
+```
+## Making figure- Condition Supplementary materials (S2)
+```{r}
+# Clean Condition factor
+alpha_div_metadata$Condition <- factor(
+  as.character(alpha_div_metadata$condition),
+  levels = c("HC", "IS")
+)
+
+condition_colors <- c(
+  "HC" = "#B3E1F0",
+  "IS" = "#148CBA"
+)
+
+alpha_theme <- theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 18, face = "bold"),
+    legend.text = element_text(size = 15),
+    legend.key.size = unit(0.6, "cm"),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(size = 18, angle = 28, hjust = 1),
+    plot.title = element_text(size = 15, face = "bold", hjust = 0.5)
+)
+
+# Build plots
+condition_faith <- ggplot(alpha_div_metadata, aes(x = Condition, y = faith_pd, fill = Condition)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(width = 0.12, size = 2.2, alpha = 0.9) +
+  scale_fill_manual(values = condition_colors, name = "Condition") +
+   labs(title = "Faith's phylogenetic diversity") +
+theme(plot.title = element_text(size = 16,face = "bold", hjust = 0.5)) +
+  alpha_theme
+
+condition_evenness <- ggplot(alpha_div_metadata, aes(x = Condition, y = pielou_evenness, fill = Condition)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(width = 0.12, size = 2.2, alpha = 0.9) +
+  scale_fill_manual(values = condition_colors, name = "Condition") +
+   labs(title = "Pielou's evenness") +
+theme(plot.title = element_text(size = 16,face = "bold", hjust = 0.5)) +
+  alpha_theme
+
+condition_shannon <- ggplot(alpha_div_metadata, aes(x = Condition, y = shannon_entropy, fill = Condition)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.7) +
+  geom_jitter(width = 0.12, size = 2.2, alpha = 0.9) +
+  scale_fill_manual(values = condition_colors, name = "Condition") +
+   labs(title = "Shannon diversity") +
+theme(plot.title = element_text(size = 16,face = "bold", hjust = 0.5)) +
+  alpha_theme
+
+
+# Merging figure with panel letters 
+alpha_supp_cond_fig <- ggpubr::ggarrange(
+  condition_shannon,
+  condition_evenness,
+  condition_faith,
+  labels = c("a", "b", "c"),
+  ncol = 3,
+  nrow = 1,
+  align = "v",
+  font.label = list(
+    size = 25,
+    face = "bold"),
+  label.x = 0.01,
+  label.y = 1.01,
+  common.legend = TRUE,
+  legend = "bottom")
+
+ggsave(
+  filename = "R_figures/alpha_div_supp_S2.tiff",
+  plot = alpha_supp_cond_fig,
+  device = "tiff",
+  width = 15,
+  height = 8,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+```
+################################################################################
+# Beta diversity- ADONIS- PERMANOVAS amd PERMDISP 
+################################################################################
+## Import beta diversity data from QIIME2 output
+```{r}
+# note - you can import the ordination/PCoA results from QIIME2 instead of the distance matrices, which require recalculation of ordinations
+# but, extracting the graphable data from the PCoA results is a little more complex, and importing the distance matrices/recalculating the ordination is very transparent and also teaches how to create ordinations in R
+
+bray_curtis_dm <- read_tsv("output_for_R/bray_curtis_distance_matrix.tsv")
+jaccard_dm <- read_tsv("output_for_R/jaccard_distance_matrix.tsv")
+uw_unifrac_dm <- read_tsv("output_for_R/unweighted_unifrac_distance_matrix.tsv")
+w_unifrac_dm <- read_tsv("output_for_R/weighted_unifrac_distance_matrix.tsv")
+
+# notice that the sample names are in the first column. We want them to be the rownames
+bray_curtis_dm <- column_to_rownames(bray_curtis_dm, var = "...1")
+jaccard_dm <- column_to_rownames(jaccard_dm, var = "...1")
+uw_unifrac_dm <- column_to_rownames(uw_unifrac_dm, var = "...1")
+w_unifrac_dm <- column_to_rownames(w_unifrac_dm, var = "...1")
+
+# create ordinations from our distance matrices
+bray_curtis_pcoa <- cmdscale(bray_curtis_dm, eig = TRUE)
+jaccard_pcoa <- cmdscale(jaccard_dm, eig = TRUE)
+uw_unifrac_pcoa <- cmdscale(uw_unifrac_dm, eig = TRUE)
+w_unifrac_pcoa <- cmdscale(w_unifrac_dm, eig = TRUE)
+
+# create a graphable data frame from our pcoa results 
+bray_curtis_df <- data.frame(bray_curtis_pcoa$points)
+jaccard_df <- data.frame(jaccard_pcoa$points)
+uw_unifrac_df <- data.frame(uw_unifrac_pcoa$points)
+w_unifrac_df <- data.frame(w_unifrac_pcoa$points)
+
+# extract the % variation for PCoA axes 1 and 2
+bray_curtis_eg <- bray_curtis_pcoa$eig
+bray_curtis_var <- bray_curtis_eg / sum(bray_curtis_eg[bray_curtis_eg > 0]) * 100
+
+jaccard_eg <- jaccard_pcoa$eig
+jaccard_var <- jaccard_eg / sum(jaccard_eg[jaccard_eg > 0]) * 100
+
+uw_unifrac_eg <- uw_unifrac_pcoa$eig
+uw_unifrac_var <- uw_unifrac_eg / sum(uw_unifrac_eg[uw_unifrac_eg > 0]) * 100
+
+w_unifrac_eg <- w_unifrac_pcoa$eig
+w_unifrac_var <- w_unifrac_eg / sum(w_unifrac_eg[w_unifrac_eg > 0]) * 100
+
+# rename the columns in our data frames
+colnames(bray_curtis_df) <- c("PCoA1", "PCoA2")
+colnames(jaccard_df) <- c("PCoA1", "PCoA2")
+colnames(uw_unifrac_df) <- c("PCoA1", "PCoA2")
+colnames(w_unifrac_df) <- c("PCoA1", "PCoA2")
+
+# add metadata to our data frames
+bray_curtis_df$sample_name <- rownames(bray_curtis_df)
+bray_curtis_df <- bray_curtis_df %>% 
+  left_join(metadata, bray_curtis_df, by = c("sample_name" = "SampleID"))
+
+jaccard_df$sample_name <- rownames(jaccard_df)
+jaccard_df <- jaccard_df %>% 
+  left_join(metadata, jaccard_df, by = c("sample_name" = "SampleID"))
+
+uw_unifrac_df$sample_name <- rownames(uw_unifrac_df)
+uw_unifrac_df <- uw_unifrac_df %>% 
+  left_join(metadata, uw_unifrac_df, by = c("sample_name" = "SampleID"))
+
+w_unifrac_df$sample_name <- rownames(w_unifrac_df)
+w_unifrac_df <- w_unifrac_df %>% 
+  left_join(metadata, w_unifrac_df, by = c("sample_name" = "SampleID"))
+
+# import metadata
+metadata <- read_tsv("Maurum_metadata_all.tsv")
+```
+## Statistical Analysis: 2x2 PERMANOVA
+```{r}
+# Bray-Curtis
+set.seed(1234)
+bray_multifactor <- adonis2(
+  bray_curtis_dm ~ treatment * condition,
+  data = bray_curtis_df,
+  permutations = 999,
+  by = "terms"
+)
+
+# Jaccard
+set.seed(1234)
+jaccard_multifactor <- adonis2(
+  jaccard_dm ~ treatment * condition,
+  data = jaccard_df,
+  permutations = 999,
+  by = "terms"
+)
+
+# Unweighted UniFrac
+set.seed(1234)
+uw_multifactor <- adonis2(
+  uw_unifrac_dm ~ treatment * condition,
+  data = uw_unifrac_df,
+  permutations = 999,
+  by = "terms"
+)
+
+# Weighted UniFrac
+set.seed(1234)
+w_multifactor <- adonis2(
+  w_unifrac_dm ~ treatment * condition,
+  data = w_unifrac_df,
+  permutations = 999,
+  by = "terms"
+)
+
+bray_multifactor
+jaccard_multifactor
+uw_multifactor
+w_multifactor
+```
+## Statistical Analysis: 2x2 PERMDISP 
+```{r}
+# PERMANOVA and PERMDISP analyses were conducted using 999 permutations with a fixed random seed to ensure reproducibility. Using betadisper() to combine 4-group factor to test multivariate homogeneity of dispersions among the cells. # Adding type = "median" documents method explicitly and protects if package ever change its defaults. 
+
+# Bray-Curtis
+bd_bray <- betadisper(
+  bray_curtis_dist,
+  bray_curtis_df$experimental_group, 
+  type = "median"
+)
+
+set.seed(1234)
+perm_bray <- permutest(
+  bd_bray,
+  permutations = 999
+)
+
+# Jaccard
+bd_jaccard <- betadisper(
+  jaccard_dist,
+  jaccard_df$experimental_group, 
+  type = "median"
+)
+set.seed(1234)
+perm_jaccard <- permutest(
+  bd_jaccard,
+  permutations = 999
+)
+
+# Unweighted UniFrac
+bd_uw <- betadisper(
+  uw_unifrac_dist,
+  uw_unifrac_df$experimental_group, 
+  type = "median"
+)
+set.seed(1234)
+perm_uw <- permutest(
+  bd_uw,
+  permutations = 999
+)
+
+# Weighted UniFrac
+bd_w <- betadisper(
+  w_unifrac_dist,
+  w_unifrac_df$experimental_group, 
+  type = "median"
+)
+set.seed(1234)
+perm_w <- permutest(
+  bd_w,
+  permutations = 999
+)
+
+# Making factor-specific PERMDISP analysis tables for treatment and condition
+permdisp_table <- data.frame(
+  Metric = c(
+    "Bray-Curtis",
+    "Jaccard",
+    "Unweighted UniFrac",
+    "Weighted UniFrac"
+  ),
+  
+  F_value = c(
+    perm_bray$tab[1, "F"],
+    perm_jaccard$tab[1, "F"],
+    perm_uw$tab[1, "F"],
+    perm_w$tab[1, "F"]
+  ),
+  
+  p_value = c(
+    perm_bray$tab[1, "Pr(>F)"],
+    perm_jaccard$tab[1, "Pr(>F)"],
+    perm_uw$tab[1, "Pr(>F)"],
+    perm_w$tab[1, "Pr(>F)"]
+  )
+)
+permdisp_table
+```
+## Statistical Analysis: Factor-specific PERMDISP assessment of dispersion among four treatment and condition
+```{r}
+#### Bray-Curtis ####
+# Factor-specific PERMDISP: Treatment
+bd_bray_treatment <- betadisper(
+  bray_curtis_dist,
+  bray_curtis_df$treatment
+)
+set.seed(1234)
+perm_bray_treatment <- permutest(
+  bd_bray_treatment,
+  permutations = 999
+)
+
+# Factor-specific PERMDISP: Condition 
+bd_bray_condition <- betadisper(
+  bray_curtis_dist,
+  bray_curtis_df$condition
+)
+set.seed(1234)
+perm_bray_condition <- permutest(
+  bd_bray_condition,
+  permutations = 999
+)
+
+### Jaccard ###
+# Factor-specific PERMDISP: Treatment
+bd_jaccard_treatment <- betadisper(
+  jaccard_dist,
+  jaccard_df$treatment
+)
+set.seed(1234)
+perm_jaccard_treatment <- permutest(
+  bd_jaccard_treatment,
+  permutations = 999
+)
+# Factor-specific PERMDISP: Condition 
+bd_jaccard_condition <- betadisper(
+  jaccard_dist,
+  jaccard_df$condition
+)
+set.seed(1234)
+perm_jaccard_condition <- permutest(
+  bd_jaccard_condition,
+  permutations = 999
+)
+
+### Unweighted UniFrac ###
+# Factor-specific PERMDISP: Treatment
+bd_uw_treatment <- betadisper(
+  uw_unifrac_dist,
+  uw_unifrac_df$treatment
+)
+set.seed(1234)
+perm_uw_treatment <- permutest(
+  bd_uw_treatment,
+  permutations = 999
+)
+# Factor-specific PERMDISP: Condition 
+bd_uw_condition <- betadisper(
+  uw_unifrac_dist,
+  uw_unifrac_df$condition
+)
+set.seed(1234)
+perm_uw_condition <- permutest(
+  bd_uw_condition,
+  permutations = 999
+)
+
+### Weighted UniFrac ###
+# Factor-specific PERMDISP: Treatment
+bd_w_treatment <- betadisper(
+  w_unifrac_dist,
+  w_unifrac_df$treatment
+)
+set.seed(1234)
+perm_w_treatment <- permutest(
+  bd_w_treatment,
+  permutations = 999
+)
+# Factor-specific PERMDISP: Condition 
+bd_w_condition <- betadisper(
+  w_unifrac_dist,
+  w_unifrac_df$condition
+)
+set.seed(1234)
+perm_w_condition <- permutest(
+  bd_w_condition,
+  permutations = 999
+)
+
+perm_bray_treatment
+perm_bray_condition
+
+perm_jaccard_treatment
+perm_jaccard_condition
+
+perm_uw_treatment
+perm_uw_condition
+
+perm_w_treatment
+perm_w_condition
+
+# Making factor-specific PERMDISP summary table 
+factor_permdisp_table <- data.frame(
+  Metric = c(
+    "Bray-Curtis",
+    "Jaccard",
+    "Unweighted UniFrac",
+    "Weighted UniFrac"
+  ),
+  
+  Treatment_F = c(
+    perm_bray_treatment$tab[1, "F"],
+    perm_jaccard_treatment$tab[1, "F"],
+    perm_uw_treatment$tab[1, "F"],
+    perm_w_treatment$tab[1, "F"]
+  ),
+  
+  Treatment_p = c(
+    perm_bray_treatment$tab[1, "Pr(>F)"],
+    perm_jaccard_treatment$tab[1, "Pr(>F)"],
+    perm_uw_treatment$tab[1, "Pr(>F)"],
+    perm_w_treatment$tab[1, "Pr(>F)"]
+  ),
+  
+  Condition_F = c(
+    perm_bray_condition$tab[1, "F"],
+    perm_jaccard_condition$tab[1, "F"],
+    perm_uw_condition$tab[1, "F"],
+    perm_w_condition$tab[1, "F"]
+  ),
+  
+  Condition_p = c(
+    perm_bray_condition$tab[1, "Pr(>F)"],
+    perm_jaccard_condition$tab[1, "Pr(>F)"],
+    perm_uw_condition$tab[1, "Pr(>F)"],
+    perm_w_condition$tab[1, "Pr(>F)"]
+  )
+)
+# Rounding to five sig figs
+factor_permdisp_table$Treatment_F <-
+  round(factor_permdisp_table$Treatment_F, 4)
+
+factor_permdisp_table$Treatment_p <-
+  round(factor_permdisp_table$Treatment_p, 4)
+
+factor_permdisp_table$Condition_F <-
+  round(factor_permdisp_table$Condition_F, 4)
+
+factor_permdisp_table$Condition_p <-
+  round(factor_permdisp_table$Condition_p, 4)
+
+factor_permdisp_table
+```
+## Make Figure- Treatment PCoA plots for supplementary figures- per request from reviewer (S3)
+```{r}
+# Function to standardize experimental-group labels
+fix_beta_groups <- function(df) {
+
+  x <- trimws(as.character(df$experimental_group))
+  x <- dplyr::recode(
+    x,
+    "bbs.HC" = "BBS/HC",
+    "bbs.IS" = "BBS/IS",
+    "maurum.HC" = "M. aurum/HC",
+    "maurum.IS" = "M. aurum/IS",
+    .default = x
+  )
+beta_colors <- c(
+  "BBS/HC" = "#B3E1F0",
+  "BBS/IS" = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+names(beta_colors)
+  df$experimental_group <- factor(x,levels = c("BBS/HC","BBS/IS","M. aurum/HC",
+  "M. aurum/IS"))
+  df
+}
+bray_curtis_df <- fix_beta_groups(bray_curtis_df)
+jaccard_df      <- fix_beta_groups(jaccard_df)
+uw_unifrac_df   <- fix_beta_groups(uw_unifrac_df)
+w_unifrac_df    <- fix_beta_groups(w_unifrac_df)
+
+# Multifactorial PERMANOVA annotation
+format_perm_p <- function(p) {
+  if (p < 0.001) {
+    "< 0.001"
+  } else {
+    sprintf("%.3f", p)
+  }
+}
+
+# Bray-Curtis 
+# Create compact multifactorial PERMANOVA label
+bray_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  bray_multifactor["treatment", "R2"],
+  bray_multifactor["treatment", "Pr(>F)"])
+
+# Include color palette
+beta_colors <- c(
+  "BBS/HC"      = "#B3E1F0",
+  "BBS/IS"      = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951")
+
+# Making the PCoA
+sample_type_bray_curtis <- ggplot(
+  bray_curtis_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = experimental_group)) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8) +
+  scale_color_manual(
+    values = beta_colors,
+    breaks = c(
+      "BBS/HC","BBS/IS","M. aurum/HC","M. aurum/IS" ),
+    labels = c("BBS/HC", "BBS/IS",
+      expression(italic("M. aurum")*"/HC"),
+      expression(italic("M. aurum")*"/IS")),
+    drop = FALSE ) +
+  xlab(paste0("PCoA1 (",round(bray_curtis_var[1], 1),"%)")) +
+  ylab(paste0("PCoA2 (",round(bray_curtis_var[2], 1),"%)")) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = bray_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 4) +
+  labs(color = "Treatment",title = "Bray-Curtis") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.title = element_text(
+      size = 30,
+      face = "bold"),
+    legend.text = element_text(size = 25),
+    legend.key.size = grid::unit(1.0,"cm"))
+
+#Jaccard
+jaccard_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  jaccard_multifactor["treatment", "R2"],
+  jaccard_multifactor["treatment", "Pr(>F)"])
+
+# Include color palette
+beta_colors <- c(
+  "BBS/HC"      = "#B3E1F0",
+  "BBS/IS"      = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+# Making the PCoA
+sample_type_jaccard <- ggplot(
+  jaccard_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = experimental_group)) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8) +
+scale_color_manual(
+    values = beta_colors,
+    breaks = c("BBS/HC","BBS/IS",
+      "M. aurum/HC",
+      "M. aurum/IS"),
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum")*"/HC"),
+      expression(italic("M. aurum")*"/IS")),
+    drop = FALSE) +
+  xlab(
+    paste0("PCoA1 (",round(jaccard_var[1], 1),"%)")) +
+  ylab(paste0("PCoA2 (",round(jaccard_var[2], 1),"%)")) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = jaccard_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 4
+  ) +
+  labs(
+    color = "Treatment", title = "Jaccard") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.title = element_text(
+      size = 30,
+      face = "bold"),
+    legend.text = element_text(size = 25),
+    legend.key.size = grid::unit(1.0,"cm"))
+
+# Weighted UniFrac
+w_unifrac_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  w_multifactor["treatment", "R2"],
+  w_multifactor["treatment", "Pr(>F)"])
+
+# Include color palette
+beta_colors <- c(
+  "BBS/HC"      = "#B3E1F0",
+  "BBS/IS"      = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+# Making the PCoA
+sample_type_w_unifrac <- ggplot(
+  w_unifrac_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = experimental_group)) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8) +
+  scale_color_manual(
+    values = beta_colors,
+    breaks = c(
+      "BBS/HC","BBS/IS",
+      "M. aurum/HC",
+      "M. aurum/IS"),
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum")*"/HC"),
+      expression(italic("M. aurum")*"/IS")),
+    drop = FALSE) +
+  xlab(paste0("PCoA1 (",round(w_unifrac_var[1], 1),"%)")) +
+  ylab(paste0("PCoA2 (",round(w_unifrac_var[2], 1),"%)")) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = w_unifrac_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 4) +
+  labs(
+    color = "Treatment", title = "Weighted UniFrac") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.title = element_text(size = 30,face = "bold"),
+    legend.text = element_text(size = 25),
+     legend.key.size = grid::unit(1.0,"cm"))
+
+sample_type_bray_curtis
+sample_type_jaccard
+sample_type_w_unifrac
+
+# Merging figures
+
+bray_plot_noleg <- sample_type_bray_curtis +
+  theme(legend.position = "none")
+
+jaccard_plot_noleg <- sample_type_jaccard +
+  theme(legend.position = "none")
+
+w_unifrac_plot_noleg <- sample_type_w_unifrac +
+  theme(legend.position = "none")
+
+#Share legend
+shared_beta_legend <- ggpubr::get_legend(
+  sample_type_bray_curtis +
+    theme(
+      legend.position = "top",
+      legend.title = element_text(size = 12, face = "bold"),
+      legend.text = element_text(size = 11)))
+
+beta_panels <- ggpubr::ggarrange(
+  bray_plot_noleg,
+  jaccard_plot_noleg,
+  w_unifrac_plot_noleg,
+  labels = c("a", "b", "c"),
+  ncol = 3,
+  nrow = 1,
+  align = "hv",
+  font.label = list(size = 25, face = "bold"),
+  label.x = 0.02,
+  label.y = 0.98
+)
+
+supp_beta_figure <- ggpubr::ggarrange(
+  shared_beta_legend,
+  beta_panels,
+  ncol = 1,
+  heights = c(0.15, 1)
+)
+
+ggsave(
+  filename = "R_figures/beta_diversity_S3.tiff",
+  plot = supp_beta_figure,
+  width = 14,
+  height = 5,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+```
+## Make Figure- Condition PCoA plots for supplementary- per request from reviewer (S4)
+```{r}
+# Function to standardize condition labels
+fix_beta_condition <- function(df) {
+
+  df$condition <- factor(
+    trimws(as.character(df$condition)),
+    levels = c("HC", "IS")
+  )
+
+  df
+}
+
+# Colors for condition plots
+beta_colors_cond <- c(
+  "HC" = "#B3E1F0",
+  "IS" = "#148CBA"
+)
+
+# Apply to each beta-diversity dataframe
+bray_curtis_cond_df <- fix_beta_condition(bray_curtis_df)
+jaccard_cond_df      <- fix_beta_condition(jaccard_df)
+uw_unifrac_cond_df   <- fix_beta_condition(uw_unifrac_df)
+w_unifrac_cond_df    <- fix_beta_condition(w_unifrac_df)
+
+
+# Bray-Curtis 
+# Create compact multifactorial PERMANOVA label
+bray_cond_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  bray_multifactor["condition", "R2"],
+  bray_multifactor["condition", "Pr(>F)"])
+
+condition_bray_curtis <- ggplot(
+  bray_curtis_cond_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = condition
+  )
+) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8
+  ) +
+  scale_color_manual(
+    values = beta_colors_cond,
+    breaks = c("HC", "IS"),
+    labels = c("HC", "IS"),
+    drop = FALSE
+  ) +
+  xlab(
+    paste0(
+      "PCoA1 (",
+      round(bray_curtis_var[1], 1),
+      "%)"
+    )
+  ) +
+  ylab(
+    paste0(
+      "PCoA2 (",
+      round(bray_curtis_var[2], 1),
+      "%)"
+    )
+  ) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = bray_cond_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 4
+  ) +
+  labs(
+    color = "Condition",
+    title = "Bray-Curtis"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.title = element_text(size = 30, face = "bold"),
+    legend.text = element_text(size = 25),
+    legend.key.size = grid::unit(1.0, "cm")
+  )
+
+#Jaccard
+jaccard_cond_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  jaccard_multifactor["condition", "R2"],
+  jaccard_multifactor["condition", "Pr(>F)"])
+
+condition_jaccard <- ggplot(
+  jaccard_cond_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = condition
+  )
+) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8
+  ) +
+  scale_color_manual(
+    values = beta_colors_cond,
+    breaks = c("HC", "IS"),
+    labels = c("HC", "IS"),
+    drop = FALSE
+  ) +
+  xlab(
+    paste0(
+      "PCoA1 (",
+      round(jaccard_var[1], 1),
+      "%)"
+    )
+  ) +
+  ylab(
+    paste0(
+      "PCoA2 (",
+      round(jaccard_var[2], 1),
+      "%)"
+    )
+  ) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = jaccard_cond_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 4
+  ) +
+  labs(
+    color = "Condition",
+    title = "Jaccard"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.title = element_text(size = 30, face = "bold"),
+    legend.text = element_text(size = 25),
+    legend.key.size = grid::unit(1.0, "cm"))
+
+# Weighted UniFrac
+w_unifrac_cond_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  w_multifactor["condition", "R2"],
+  w_multifactor["condition", "Pr(>F)"])
+
+condition_w_unifrac <- ggplot(
+  w_unifrac_cond_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = condition
+  )
+) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8
+  ) +
+  scale_color_manual(
+    values = beta_colors_cond,
+    breaks = c("HC", "IS"),
+    labels = c("HC", "IS"),
+    drop = FALSE
+  ) +
+  xlab(
+    paste0(
+      "PCoA1 (",
+      round(w_unifrac_var[1], 1),
+      "%)"
+    )
+  ) +
+  ylab(
+    paste0(
+      "PCoA2 (",
+      round(w_unifrac_var[2], 1),
+      "%)"
+    )
+  ) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = w_unifrac_cond_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 4
+  ) +
+  labs(
+    color = "Condition",
+    title = "Weighted UniFrac"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    legend.title = element_text(size = 30, face = "bold"),
+    legend.text = element_text(size = 25),
+    legend.key.size = grid::unit(1.0, "cm"))
+
+condition_bray_curtis
+condition_jaccard
+condition_w_unifrac
+
+# Merging figures
+
+bray_plot_noleg_cond <- condition_bray_curtis +
+  theme(legend.position = "none")
+
+jaccard_plot_noleg_cond <- condition_jaccard +
+  theme(legend.position = "none")
+
+w_unifrac_plot_noleg_cond <- condition_w_unifrac +
+  theme(legend.position = "none")
+
+#Share legend
+shared_beta_legend_cond <- ggpubr::get_legend(
+  condition_bray_curtis +
+    theme(
+      legend.position = "top",
+      legend.title = element_text(size = 12, face = "bold"),
+      legend.text = element_text(size = 11)))
+
+beta_panels_cond <- ggpubr::ggarrange(
+  bray_plot_noleg_cond,
+  jaccard_plot_noleg_cond,
+  w_unifrac_plot_noleg_cond,
+  labels = c("a", "b", "c"),
+  ncol = 3,
+  nrow = 1,
+  align = "hv",
+  font.label = list(size = 25, face = "bold"),
+  label.x = c(0.01, 0.01, 0.01),
+  label.y = c(1.04, 1.04, 1.04)
+)
+
+supp_beta_condition_figure <- ggpubr::ggarrange(
+  shared_beta_legend_cond,
+  beta_panels_cond,
+  ncol = 1,
+  heights = c(0.15, 1)
+)
+
+ggsave(
+  filename = "R_figures/beta_div_S4.tiff",
+  plot = supp_beta_condition_figure,
+  width = 14,
+  height = 5,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+```
+##########################################################################
+# Merging Treatment and Condition Obsereved ASV Alpha Diversity and
+# Treatment and Condition Unweighted UniFrac beta diversity metrics together as per reviewers comments
+# (Figure 2) 
+############################################################################
+```{r}
+## Alpha Diversity panels 
+
+# Plot theme and factors 
+alpha_div_metadata$experimental_group <- paste0(
+  tolower(as.character(alpha_div_metadata$treatment)),
+  ".",
+  as.character(alpha_div_metadata$condition)
+)
+
+# order + relabel groups
+alpha_div_metadata$experimental_group <- factor(
+  alpha_div_metadata$experimental_group,
+  levels = c("bbs.HC", "bbs.IS", "maurum.HC", "maurum.IS"),
+  labels = c("BBS/HC", "BBS/IS", "M. aurum/HC", "M. aurum/IS")
+)
+
+group_colors <- c(
+  "BBS/HC" = "#B3E1F0",
+  "BBS/IS" = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+
+condition_colors <- c(
+  "HC" = "#B3E1F0",
+  "IS" = "#148CBA")
+
+alpha_theme <- theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(
+    colour = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(
+      size = 18,
+      angle = 28,
+      hjust = 1),
+    axis.text.y = element_text(size = 18),
+    plot.title = element_text(
+      size = 18,
+      hjust = 0.5),
+    legend.position = "bottom",
+    legend.title = element_text(
+      size = 18,
+      face = "bold"),
+    legend.text = element_text(
+      size = 15),
+    legend.key.size = grid::unit(0.6,"cm"))
+
+
+# Treatment Observed ASV
+sample_type_obs_feat <- ggplot(
+  alpha_div_metadata,
+  aes(x = experimental_group, y = observed_features, fill = experimental_group)) +
+  geom_boxplot(
+    width = 0.7,
+    outlier.shape = NA,
+    linewidth = 0.7) +
+  geom_jitter(
+    width = 0.12,
+    size = 2.2,
+    alpha = 0.9) +
+  scale_fill_manual(
+    values = group_colors,
+    name = "Treatment",
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum") ~ "/HC"),
+      expression(italic("M. aurum") ~ "/IS")
+    )
+  ) +
+  scale_x_discrete(
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum") ~ "/HC"),
+      expression(italic("M. aurum") ~ "/IS")
+    )
+  ) +
+  labs(
+    title = "Observed ASV",
+    x = NULL,
+    y = NULL) +
+  alpha_theme
+
+# Condition Observed ASV
+condition_obs_feat <- ggplot(
+  alpha_div_metadata,
+  aes(x = Condition,y = observed_features,fill = Condition)
+) +
+  geom_boxplot(
+    width = 0.7,
+    outlier.shape = NA,
+    linewidth = 0.7) +
+  geom_jitter(
+    width = 0.12,
+    size = 2.2,
+    alpha = 0.9) +
+  scale_fill_manual(
+    values = condition_colors,
+    name = "Condition") +
+  labs(
+    title = "Observed ASV",
+    x = NULL,
+    y = NULL) +
+  alpha_theme
+
+## Beta Diveristy Panels 
+
+# Unweighted UniFrac Treatment 
+uw_unifrac_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  uw_multifactor["treatment", "R2"],
+  uw_multifactor["treatment", "Pr(>F)"])
+
+# Include color palette
+beta_colors <- c(
+  "BBS/HC"      = "#B3E1F0",
+  "BBS/IS"      = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+# Making the PCoA
+sample_type_uw_unifrac <- ggplot(
+  w_unifrac_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = experimental_group)) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8) +
+  scale_color_manual(
+    values = beta_colors,
+    breaks = c(
+      "BBS/HC","BBS/IS",
+      "M. aurum/HC",
+      "M. aurum/IS"),
+    labels = c(
+      "BBS/HC",
+      "BBS/IS",
+      expression(italic("M. aurum")*"/HC"),
+      expression(italic("M. aurum")*"/IS")),
+    drop = FALSE) +
+  xlab(paste0("PCoA1 (",round(uw_unifrac_var[1], 1),"%)")) +
+  ylab(paste0("PCoA2 (",round(uw_unifrac_var[2], 1),"%)")) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = uw_unifrac_perm_label,
+    parse = TRUE, 
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 3.8) +
+  labs(
+    color = "Treatment",
+    title = "Unweighted UniFrac") +
+ theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    plot.title = element_text(
+    size = 18,
+    hjust = 0.5), 
+    plot.title.position = "plot", 
+    legend.title = element_text(
+      size = 30,
+      face = "bold"),
+    legend.text = element_text(
+      size = 25),
+    legend.key.size = grid::unit(
+      1.0,
+      "cm"))
+
+# Unweighted UniFrac Condition 
+uw_unifrac_cond_perm_label <- sprintf(
+  'paste("PERMANOVA: ", italic(R)^2, " = %.3f, ", italic(p), " = %.3f")',
+  uw_multifactor["condition", "R2"],
+  uw_multifactor["condition", "Pr(>F)"])
+
+condition_uw_unifrac <- ggplot(
+  uw_unifrac_cond_df,
+  aes(
+    x = PCoA1,
+    y = PCoA2,
+    color = condition
+  )
+) +
+  geom_point(size = 3) +
+  stat_ellipse(
+    type = "t",
+    level = 0.95,
+    linewidth = 0.8
+  ) +
+  scale_color_manual(
+    values = beta_colors_cond,
+    breaks = c("HC", "IS"),
+    labels = c("HC", "IS"),
+    drop = FALSE
+  ) +
+  xlab(
+    paste0(
+      "PCoA1 (",
+      round(uw_unifrac_var[1], 1),
+      "%)"
+    )
+  ) +
+  ylab(
+    paste0(
+      "PCoA2 (",
+      round(uw_unifrac_var[2], 1),
+      "%)"
+    )
+  ) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    label = uw_unifrac_cond_perm_label,
+    parse = TRUE,
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 3.8
+  ) +
+  labs(
+    color = "Condition",
+    title = "Unweighted UniFrac") + 
+ theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black"),
+    plot.title = element_text(
+    size = 18,
+    hjust = 0.5), 
+    plot.title.position = "plot", 
+    legend.title = element_text(
+      size = 26,
+      face = "bold"),
+    legend.text = element_text(
+      size = 25),
+    legend.key.size = grid::unit(
+      1.0,
+      "cm"))
+
+# Merging legends from the four figures together into one
+sample_type_obs_feat_plot_noleg <- sample_type_obs_feat +
+  theme(legend.position = "none")
+condition_obs_feat_plot_noleg <- condition_obs_feat +
+  theme(legend.position = "none")
+sample_type_uw_unifrac_plot_noleg <- sample_type_uw_unifrac +
+  theme(legend.position = "none", axis.title.x = element_text(
+    margin = margin(t = 4)),
+ plot.margin = margin(
+  t = 5, 
+  r = 5, 
+  b = 2, 
+  l = 5) 
+)
+condition_uw_unifrac_plot_noleg <- condition_uw_unifrac +
+  theme(legend.position = "none", axis.title.x = element_text(
+    margin = margin(t = 4)),
+ plot.margin = margin(
+  t = 5, 
+  r = 5, 
+  b = 2, 
+  l = 5) 
+)
+# Merge the four figures with the no legends in the 2x2 panels 
+microbiome_main_fig_panel <- ggpubr::ggarrange(
+  sample_type_obs_feat_plot_noleg,
+  condition_obs_feat_plot_noleg,
+  sample_type_uw_unifrac_plot_noleg,
+  condition_uw_unifrac_plot_noleg,
+  labels = c("A", "B", "C", "D"),
+  ncol = 2,
+  nrow = 2,
+  align = "v",
+  font.label = list(
+    size = 26,
+    face = "bold"),
+  label.x = 0.02,
+  label.y = 0.98)
+
+#Sharing figure with one legend 
+group_legend <- ggpubr::get_legend(
+  sample_type_obs_feat +
+    theme(
+      legend.position = "bottom",
+      legend.title = element_text(
+        size = 16,
+        face = "bold"),
+      legend.text = element_text(
+        size = 14),
+      legend.margin = margin(
+        t = 0,
+        r = 0,
+        b = 0,
+        l = 0),
+      legend.box.margin = margin(
+        t = 0,
+        r = 0,
+        b = 0,
+        l = 0)
+    )
+)
+condition_legend <- ggpubr::get_legend(
+  condition_obs_feat +
+    theme(
+     legend.position = "bottom",
+      legend.title = element_text(
+        size = 16,
+        face = "bold"),
+      legend.text = element_text(
+        size = 14),
+      legend.margin = margin(
+        t = 0,
+        r = 0,
+        b = 0,
+        l = 0),
+      legend.box.margin = margin(
+        t = 0,
+        r = 0,
+        b = 0,
+        l = 0)
+    )
+)
+
+shared_microbiome_legend <- ggpubr::ggarrange(
+  group_legend,
+  condition_legend,
+  ncol = 2,
+  widths = c(2, 1))
+
+main_microbiome_figure <- ggpubr::ggarrange(
+  microbiome_main_fig_panel,
+  shared_microbiome_legend,
+  ncol = 1,
+  heights = c(1, 0.07))
+
+# Save TIFF
+ggsave(
+  filename = "combined_microbiome_main_figure.tiff",
+  plot = main_microbiome_figure,
+  device = "tiff",
+  width = 11,
+  height = 9,
+  units = "in",
+  dpi = 600,
+  compression = "lzw", 
+  limitsize = FALSE, 
+  bg = "white"
+)
+```
+################################################################################
+# Taxonomy
+################################################################################
+## Import feature table and taxonomy data from QIIME2 output
+```{r}
+tabulated_results <- read_tsv("output_for_R/tabulated_results.tsv")
+```
+## Format, convert taxonomy to relative abundance, and group at taxonomic levels
+```{r}
+# format data for making a taxa plot
+# get rid of #q2:types row
+tabulated_results <- tabulated_results[2:nrow(tabulated_results),]
+
+# remove non-numeric columns
+# we will filter out Taxon for now so we can calculate relative abundances, but will add it back later
+tabulated_results_filt <- tabulated_results %>% 
+  select(-all_of(c("Sequence","Confidence","Taxon")))
+# we keep id and make it as the row name
+tabulated_results_filt <- column_to_rownames(tabulated_results_filt, var = "id")
+
+# calculate relative abundances
+tabulated_results_filt[] <- lapply(tabulated_results_filt, function(x) as.numeric(as.character(x)))
+rel_abundance <- apply(tabulated_results_filt, 2, function(x) x / sum(x))
+
+# check that each column adds up to 1
+colSums(rel_abundance)
+
+# re-add taxonomy to relative abundance table
+rel_abundance <- data.frame(rel_abundance, check.names = FALSE)
+rel_abundance$id <- rownames(rel_abundance)
+
+tabulated_results_merge <- tabulated_results %>% # create a tabulated results for merging
+  select(all_of(c("id","Taxon")))
+
+rel_abundance_taxa <- merge(rel_abundance, tabulated_results_merge, by = "id", all.x = TRUE)
+
+# we now have a table with the per-sample relative abundances of each ASV (along with their taxonomic assignments)
+
+# Taxon column data is messy - let's split the data up into taxonomic ranks
+rel_abundance_taxa_split <- rel_abundance_taxa %>% 
+  separate(Taxon, 
+           into = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           sep = ";\\s*",  # splits on semicolon and optional space
+           fill = "right", # fills missing columns with NA if some rows are shorter
+           remove = TRUE) # remove original "Taxon" column too
+
+# some ranks have a value even though they are unidentified (e.g., g__, s__)
+# let's change those to NAs
+rel_abundance_taxa_split[rel_abundance_taxa_split == "d__"] <- NA
+rel_abundance_taxa_split[rel_abundance_taxa_split == "p__"] <- NA
+rel_abundance_taxa_split[rel_abundance_taxa_split == "c__"] <- NA
+rel_abundance_taxa_split[rel_abundance_taxa_split == "o__"] <- NA
+rel_abundance_taxa_split[rel_abundance_taxa_split == "f__"] <- NA
+rel_abundance_taxa_split[rel_abundance_taxa_split == "g__"] <- NA
+rel_abundance_taxa_split[rel_abundance_taxa_split == "s__"] <- NA
+
+# create a column with the lowest identified taxonomic level for all ASVs
+rel_abundance_taxa_lowest <- rel_abundance_taxa_split %>% 
+  rowwise() %>%
+  mutate(LowestTaxLevel = {
+    tax_levels <- c(Domain, Phylum, Class, Order, Family, Genus, Species)
+    last_non_na <- tail(na.omit(tax_levels), 1)
+    ifelse(length(last_non_na) > 0, last_non_na, NA)
+  }) %>%
+  ungroup()
+
+
+# group by the lowest taxonomic level
+rel_abundance_taxa_lowest <- rel_abundance_taxa_lowest %>%
+dplyr::mutate(LowestTaxLevel = ifelse(is.na(LowestTaxLevel), "Unassigned", LowestTaxLevel)) %>% # convert NAs to "Unassigned"
+dplyr::group_by(LowestTaxLevel) %>%
+dplyr::summarise(
+dplyr::across(where(is.numeric), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+# save the file
+saveRDS(rel_abundance_taxa_lowest, "R_output_data/rel_abundance_taxa_lowest.RDS")
+
+# group at level 5/Family level
+rel_abundance_taxa_family <- rel_abundance_taxa_split %>%
+  dplyr::mutate(Family = ifelse(is.na(Family), "Unassigned", Family)) %>%
+  dplyr::group_by(Family) %>%
+  dplyr::summarise(
+    dplyr::across(where(is.numeric), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# save the file
+saveRDS(rel_abundance_taxa_family, "R_output_data/rel_abundance_taxa_family.RDS")
+
+# group at level 6/Genus level 
+rel_abundance_taxa_genus <- rel_abundance_taxa_split %>%
+  dplyr::mutate(Genus = ifelse(is.na(Genus), "Unassigned", Genus)) %>%
+  dplyr::group_by(Genus) %>%
+  dplyr::summarise(
+    dplyr::across(where(is.numeric), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+# save the file
+saveRDS(rel_abundance_taxa_genus, "R_output_data/rel_abundance_taxa_genus.RDS")
+
+# this allows you to have either the lowest-identified level or collapsed taxonomic tables 
+```
+## Generating Taxaplot (Figure 3)
+```{r}
+# Build your phyloseq
+pseq <- qiime2R::qza_to_phyloseq(
+  feature  = "maurum_table.qza",
+  taxonomy = "silva-taxonomy.qza",
+  metadata = "Maurum_metadata_all.tsv"
+)
+
+taxonomy.table <- as.data.frame(tax_table(pseq))
+
+phylum_name_updates <- c(
+  "Firmicutes"      = "Bacillota",
+  "Bacteroidetes"   = "Bacteroidota",
+  "Proteobacteria"  = "Pseudomonadota",
+  "Actinobacteriota"  = "Actinomycetota",
+  "Fusobacteria"    = "Fusobacteriota",
+  "Lentisphaerae"   = "Lentisphaerota",
+  "Tenericutes"     = "Mycoplasmatota",
+  "Synergistetes"   = "Synergistota",
+  "Verrucomicrobia" = "Verrucomicrobiota"
+)
+
+make_microshades_phylum <- function(pseq, subgroup) {
+
+# Rename metadata column "Sample" if needed
+  sd <- as.data.frame(phyloseq::sample_data(pseq))
+  if ("Sample" %in% names(sd)) {
+    names(sd)[names(sd) == "Sample"] <- "Sample_meta"
+    phyloseq::sample_data(pseq) <- phyloseq::sample_data(sd)
+  }
+
+# Prep microshades dataframe
+  mdf_prep <- microshades::prep_mdf(pseq, subgroup_level = subgroup)
+
+  # Update phylum names for display
+  if ("Phylum" %in% names(mdf_prep)) {
+    mdf_prep$Phylum <- dplyr::recode(
+      as.character(mdf_prep$Phylum),
+      !!!phylum_name_updates,
+      .default = as.character(mdf_prep$Phylum)
+    )
+  }
+
+bad_taxa <- "uncultured|unknown|unclassified|ambiguous|metagenome"
+
+# Remove unwanted family labels BEFORE microshades makes the key
+mdf_prep <- mdf_prep %>%
+  dplyr::filter(
+    !is.na(Phylum),
+    Phylum != "",
+    !grepl(bad_taxa, Phylum, ignore.case = TRUE),
+    !is.na(.data[[subgroup]]),
+    .data[[subgroup]] != "",
+    !grepl(bad_taxa, .data[[subgroup]], ignore.case = TRUE)
+  )
+
+# Color assignment order 
+selected_phyla <- c(
+  "Bacillota",
+  "Bacteroidota",
+  "Actinomycetota",
+  "Desulfobacterota",
+  "Verrucomicrobiota"
+)
+
+# Keep only phyla present in the dataset
+selected_phyla <- selected_phyla[
+  selected_phyla %in% unique(as.character(mdf_prep$Phylum))
+]
+# Build microshades color/data frames
+  co <- microshades::create_color_dfs(
+    mdf_prep,
+    selected_groups = selected_phyla,
+    group_level     = "Phylum",
+    subgroup_level  = subgroup,
+    top_n_subgroups = 4,
+    cvd             = TRUE
+  )
+
+  mdf_GP <- co$mdf
+  cdf_GP <- co$cdf
+
+# Custom legend/key
+GP_legend <- custom_legend(
+  mdf_GP,
+  cdf_GP,
+  legend_key_size  = unit(0.4, "cm"),
+  legend_text_size = 15,
+  subgroup_level   = subgroup
+)
+
+# Rename facet labels
+  mdf_GP$experimental_group <- dplyr::recode(
+    mdf_GP$experimental_group,
+    "bbs.HC"    = "BBS/HC",
+    "bbs.IS"    = "BBS/IS",
+    "maurum.HC" = "M. aurum/HC",
+    "maurum.IS" = "M. aurum/IS"
+  )
+
+# Plot
+  p <- microshades::plot_microshades(
+    mdf_GP, cdf_GP,
+    x = "Sample",
+    y = "Abundance",
+    group_label = paste("Phylum", subgroup)
+  ) +
+    scale_y_continuous(
+      labels = scales::percent,
+      expand = expansion(0)
+    ) +
+    labs(y = "Relative abundance") +
+    theme(legend.position = "none") +
+    facet_grid(
+      ~ experimental_group,
+      scales = "free_x",
+      space = "free_x",
+      labeller = as_labeller(c(
+        "BBS/HC"      = "BBS/HC",
+        "BBS/IS"      = "BBS/IS",
+        "M. aurum/HC" = "italic('M. aurum')*'/HC'",
+        "M. aurum/IS" = "italic('M. aurum')*'/IS'"
+      ), label_parsed)
+    ) +
+    theme(
+      axis.title.y = element_text(size = 20, face = "bold"),
+      axis.title.x = element_text(size = 20, face = "bold"),
+      axis.text.y  = element_text(size = 20),
+      axis.text.x = element_text(
+      size = 9,
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5 # Individual sample IDs
+  ),
+
+      strip.text   = element_text(size = 20, face = "bold")
+    )
+
+  cowplot::plot_grid(p, GP_legend, rel_widths = c(1, 0.38))
+}
+
+# Run
+multi <- make_microshades_phylum(pseq, "Family")
+
+# Save
+ggsave(
+  filename = "R_figures/taxa_barplot_experimentalgroup.tiff",
+  plot = multi,
+  device = "tiff",
+  width = 20,
+  height = 9,
+  units = "in",
+  dpi = 600,
+  compression = "lzw"
+)
+```
+################################################################################
+# Differential Abundance- ASV, ANCOM-BC2, and Relative Abundances  
+################################################################################
+## ASV Level 
+```{r}
+# Parse taxonomy into ranks- Order, Family, Genus, Species
+metadata <- read_q2metadata("Maurum_metadata_all.tsv")
+metadata <- metadata[metadata$SampleID != "#q2:types", ]
+rownames(metadata) <- metadata$SampleID
+
+asv_table <- read_qza("maurum_table.qza")$data
+taxonomy_parsed <- read_qza("silva-taxonomy.qza")$data %>%
+  parse_taxonomy()
+
+taxonomy_parsed <- taxonomy_parsed[match(rownames(asv_table), rownames(taxonomy_parsed)), ]
+
+ps_asv <- phyloseq(
+  otu_table(as.matrix(asv_table), taxa_are_rows = TRUE),
+  tax_table(as.matrix(taxonomy_parsed)),
+  sample_data(metadata)
+)
+
+rank_names(ps_asv)
+#Interpretation of taxonomy coverage is great ~99% for Order and Family. ~82% for Genus. ~50% for species. Need to be careful at interpret it since many ASVs will be NA, uncultured, or ambiguous
+```
+## Statistical Analysis: 2x2 ANCOM-BC2 Set-up 
+```{r}
+# Make sure factors are set
+sample_data(ps_asv)$condition <- factor(
+  as.character(sample_data(ps_asv)$condition),
+  levels = c("HC", "IS")
+)
+
+sample_data(ps_asv)$treatment <- trimws(as.character(sample_data(ps_asv)$treatment))
+
+sample_data(ps_asv)$treatment[sample_data(ps_asv)$treatment == "BBS"] <- "bbs"
+
+sample_data(ps_asv)$treatment[sample_data(ps_asv)$treatment == "M. aurum"] <- "maurum"
+
+sample_data(ps_asv)$treatment <- factor(
+  sample_data(ps_asv)$treatment,
+  levels = c("bbs", "maurum")
+)
+
+# Treat cohort as a categorical blocking variable
+sample_data(ps_asv)$cohort <- factor(
+  trimws(as.character(sample_data(ps_asv)$cohort))
+)
+
+# Check the distribution of experimental groups across cohorts
+metadata <- as.data.frame(sample_data(ps_asv))
+
+with(
+  metadata,
+  table(
+    cohort,
+    paste(treatment, condition, sep = "/"),
+    useNA = "ifany")
+)
+
+# Aggregate to phylum + genus
+ps_phylum <- tax_glom(ps_asv, taxrank = "Phylum", NArm = FALSE)
+ps_genus  <- tax_glom(ps_asv, taxrank = "Genus",  NArm = FALSE)
+
+# Filter taxa that are below 0.01%
+filter_aggregated_abundance <- function(
+  ps_obj,
+  rank_name,
+  cutoff = 0.0001  # 0.01% expressed as a proportion
+) {
+
+  stopifnot(
+    length(cutoff) == 1L,
+    is.finite(cutoff),
+    cutoff > 0,
+    cutoff <= 1
+  )
+
+# Extract original counts with taxa in rows
+  counts <- as(phyloseq::otu_table(ps_obj), "matrix")
+
+  if (!phyloseq::taxa_are_rows(ps_obj)) {
+    counts <- t(counts)
+  }
+
+  if (
+    any(!is.finite(counts)) ||
+    any(counts < 0) ||
+    any(abs(counts - round(counts)) > 1e-8)
+  ) {
+    stop("Use the original aggregated count object.")
+  }
+
+  sample_reads_before <- colSums(counts)
+  taxon_reads <- rowSums(counts)
+  total_reads <- sum(counts)
+
+  stopifnot(
+    is.finite(total_reads),
+    total_reads > 0,
+    all(sample_reads_before > 0)
+  )
+
+# Calculate pooled abundance BEFORE removing any taxa
+  pooled_abundance <- taxon_reads / total_reads
+
+# Retain the boundary: exactly 0.01% is kept
+  keep <- pooled_abundance >= cutoff
+  kept_ids <- rownames(counts)[keep]
+
+  if (!any(keep)) {
+    stop("No taxa meet the cutoff. Review the filtering rule.")
+  }
+
+# Create a filtered copy
+  filtered_ps <- phyloseq::prune_taxa(
+    kept_ids,
+    ps_obj
+  )
+
+# Confirm all original sample IDs remain
+  stopifnot(
+    setequal(
+      phyloseq::sample_names(filtered_ps),
+      colnames(counts)
+    )
+  )
+
+# Confirm retained counts have not changed
+  filtered_counts <- as(
+    phyloseq::otu_table(filtered_ps),
+    "matrix"
+  )
+
+  if (!phyloseq::taxa_are_rows(filtered_ps)) {
+    filtered_counts <- t(filtered_counts)
+  }
+
+  filtered_counts <- filtered_counts[
+    kept_ids,
+    colnames(counts),
+    drop = FALSE
+  ]
+
+  stopifnot(
+    all(
+      filtered_counts ==
+        counts[keep, , drop = FALSE]
+    )
+  )
+
+# Taxonomic names for reporting
+  taxonomy <- as(
+    phyloseq::tax_table(ps_obj),
+    "matrix"
+  )
+
+  stopifnot(
+    rank_name %in% colnames(taxonomy),
+    all(rownames(counts) %in% rownames(taxonomy))
+  )
+
+  taxon_names <- as.character(
+    taxonomy[rownames(counts), rank_name]
+  )
+
+  if (rank_name == "Phylum") {
+    taxon_names <- update_phylum_names(taxon_names)
+  }
+
+  taxon_names <- gsub("\\[|\\]", "", taxon_names)
+
+  taxon_names[
+    is.na(taxon_names) | trimws(taxon_names) == ""
+  ] <- "Unclassified"
+
+  n_detected <- rowSums(counts > 0)
+
+# Record the decision for every original taxon
+  taxon_report <- data.frame(
+    taxonomic_level = rank_name,
+    TaxonID = rownames(counts),
+    taxon_name = taxon_names,
+    total_reads = unname(taxon_reads),
+    pooled_abundance_percent =
+      100 * unname(pooled_abundance),
+    cutoff_percent = 100 * cutoff,
+    n_samples = ncol(counts),
+    n_detected = unname(n_detected),
+    n_zero = ncol(counts) - unname(n_detected),
+    keep_for_analysis = unname(keep),
+    stringsAsFactors = FALSE)
+
+  taxon_report <- taxon_report[
+    order(taxon_report$pooled_abundance_percent),
+    ,
+    drop = FALSE
+  ]
+
+  rownames(taxon_report) <- NULL
+
+# Quantify read loss within each sample
+  sample_reads_after <- colSums(filtered_counts)
+  sample_report <- data.frame(
+    Sample = colnames(counts),
+    reads_before = unname(sample_reads_before),
+    reads_after = unname(sample_reads_after),
+    reads_removed = unname(
+      sample_reads_before - sample_reads_after
+    ),
+    percent_reads_removed = 100 * unname(
+      (sample_reads_before - sample_reads_after) /
+        sample_reads_before
+    ),
+    stringsAsFactors = FALSE)
+
+  filter_summary <- data.frame(
+    taxonomic_level = rank_name,
+    cutoff_percent = 100 * cutoff,
+    n_samples_before = ncol(counts),
+    n_samples_after = phyloseq::nsamples(filtered_ps),
+    n_taxa_before = nrow(counts),
+    n_taxa_retained = sum(keep),
+    n_taxa_removed = sum(!keep),
+    reads_removed = sum(taxon_reads[!keep]),
+    percent_reads_removed =
+      100 * sum(taxon_reads[!keep]) / total_reads,
+    n_samples_without_retained_reads =
+      sum(sample_reads_after == 0),
+    stringsAsFactors = FALSE
+  )
+
+  list(
+    filtered = filtered_ps,
+    summary = filter_summary,
+    taxon_report = taxon_report,
+    sample_report = sample_report
+  )
+}
+
+# Apply independently to the original aggregated count objects
+phylum_abundance_filter <- filter_aggregated_abundance(
+  ps_obj = ps_phylum,
+  rank_name = "Phylum",
+  cutoff = 0.0001)
+
+genus_abundance_filter <- filter_aggregated_abundance(
+  ps_obj = ps_genus,
+  rank_name = "Genus",
+  cutoff = 0.0001)
+
+# New count objects for the filtered analyses
+ps_phylum_filtered <- phylum_abundance_filter$filtered
+ps_genus_filtered <- genus_abundance_filter$filtered
+
+# Combined filtering summary
+abundance_filter_summary <- rbind(
+  phylum_abundance_filter$summary,
+  genus_abundance_filter$summary)
+
+print(
+  abundance_filter_summary,
+  row.names = FALSE)
+
+# List the taxa removed at each rank
+phylum_taxa_removed <- subset(
+  phylum_abundance_filter$taxon_report,
+  !keep_for_analysis)
+
+genus_taxa_removed <- subset(
+  genus_abundance_filter$taxon_report,
+  !keep_for_analysis)
+
+print(phylum_taxa_removed, row.names = FALSE)
+print(genus_taxa_removed, row.names = FALSE)
+```
+### ANCOM-BC2: Making ANCOM-BC2 runner 
+```{r}
+# Match sample order across counts and metadata; resolving sample-specific estimation biases error with the randomizing-block cohort effect which caused some issues. 
+  run_ancombc2_factorial <- function(ps_aggregated, ps_raw = ps_asv) {
+
+  # ASV counts for sample-specific bias estimation
+  asv_counts <- as(phyloseq::otu_table(ps_raw), "matrix")
+
+  if (!phyloseq::taxa_are_rows(ps_raw)) {
+    asv_counts <- t(asv_counts)
+  }
+
+  # Aggregated counts for the requested taxonomic level
+  aggregated_counts <- as(
+    phyloseq::otu_table(ps_aggregated),
+    "matrix"
+  )
+
+  if (!phyloseq::taxa_are_rows(ps_aggregated)) {
+    aggregated_counts <- t(aggregated_counts)
+  }
+
+  sample_ids <- colnames(aggregated_counts)
+
+  ancom_metadata <- data.frame(
+    phyloseq::sample_data(ps_aggregated),
+    check.names = FALSE
+  )
+
+  stopifnot(
+    all(sample_ids %in% colnames(asv_counts)),
+    all(sample_ids %in% rownames(ancom_metadata))
+  )
+
+  # Match sample order across both count tables and metadata
+  asv_counts <- asv_counts[, sample_ids, drop = FALSE]
+  ancom_metadata <- ancom_metadata[sample_ids, , drop = FALSE]
+
+  stopifnot(
+    is.data.frame(ancom_metadata),
+    !isS4(ancom_metadata),
+    identical(rownames(ancom_metadata), colnames(asv_counts)),
+    identical(colnames(aggregated_counts), colnames(asv_counts))
+  )
+
+  set.seed(1234)
+  ANCOMBC::ancombc2(
+    data = asv_counts,
+    aggregate_data = aggregated_counts,
+    meta_data = ancom_metadata,
+    taxa_are_rows = TRUE,
+    tax_level = NULL,
+    fix_formula = "treatment * condition",
+    rand_formula = "(1 | cohort)", # randomized-block for cohort 
+    group = NULL,
+    struc_zero = FALSE,
+    neg_lb = FALSE,
+    p_adj_method = "BH",
+    prv_cut = 0.10,
+    lib_cut = 1000,       
+    pseudo_sens = TRUE,  # Pseudocount-sensitivity analysis
+    alpha = 0.05,
+    n_cl = 1,
+    verbose = TRUE,
+    global = FALSE,
+    pairwise = FALSE,
+    dunnet = FALSE,
+    trend = FALSE
+  )
+}
+```
+### ANCOM-BC2: Making customized runner for genus; correcting degrees of freedom alignment error
+```{r}
+run_ancombc2_genus_df_fix <- function(
+  ps_aggregated,
+  ps_raw = ps_asv
+) {
+
+  original_function <- getFromNamespace(".iter_remle", "ANCOMBC")
+
+  source_text <- paste(
+    deparse(body(original_function), width.cutoff = 500L),
+    collapse = "\n"
+  )
+
+  target <- 'dof = do.call("rbind", dof)'
+  matches <- gregexpr(target, source_text, fixed = TRUE)[[1]]
+
+  if (length(matches) != 1L || matches[[1]] < 0L) {
+    stop(
+      "Expected degrees-of-freedom binding step was not found exactly once."
+    )
+  }
+
+  corrected_binding <- quote(
+    do.call("rbind", lapply(dof, function(df_i) {
+
+      aligned <- setNames(
+        rep(NA_real_, length(fix_eff)),
+        fix_eff
+      )
+
+      available <- intersect(fix_eff, names(df_i))
+      aligned[available] <- df_i[available]
+
+      aligned
+    }))
+  )
+
+  replacement <- paste(
+    "dof =",
+    paste(
+      deparse(corrected_binding, width.cutoff = 500L),
+      collapse = "\n"
+    )
+  )
+
+  corrected_function <- original_function
+
+  body(corrected_function) <- parse(
+    text = sub(target, replacement, source_text, fixed = TRUE)
+  )[[1]]
+
+  # Always restore the original package routine afterward
+  on.exit(
+    utils::assignInNamespace(
+      ".iter_remle",
+      original_function,
+      ns = "ANCOMBC"
+    ),
+    add = TRUE
+  )
+
+  utils::assignInNamespace(
+    ".iter_remle",
+    corrected_function,
+    ns = "ANCOMBC"
+  )
+
+  run_ancombc2_factorial(
+    ps_aggregated = ps_aggregated,
+    ps_raw = ps_raw
+  )
+}
+```
+### ANCOM-BC2: Analysis with corrections filters and screening structural zeroes. Note this could take awhile
+```{r}
+# Phylum filter: retain the existing bias-estimation approach 
+ancom2_phylum_filtered_BH <- run_ancombc2_factorial(
+  ps_raw = ps_asv,
+  ps_aggregated = ps_phylum_filtered)
+
+# Genus filter: retain the existing degrees-of-freedom alignment correction
+ancom2_genus_filtered_BH <- run_ancombc2_genus_df_fix(
+  ps_raw = ps_asv,
+  ps_aggregated = ps_genus_filtered)
+
+# Check the final fitted sample and taxon counts
+filtered_fit_check <- data.frame(
+  taxonomic_level = c("Phylum", "Genus"),
+
+  taxa_after_abundance_filter = c(
+    phyloseq::ntaxa(ps_phylum_filtered),
+    phyloseq::ntaxa(ps_genus_filtered)
+  ),
+
+  taxa_in_ANCOMBC2_results = c(
+    nrow(ancom2_phylum_filtered_BH$res),
+    nrow(ancom2_genus_filtered_BH$res)
+  ),
+
+  fitted_samples = c(
+    ncol(ancom2_phylum_filtered_BH$bias_correct_log_table),
+    ncol(ancom2_genus_filtered_BH$bias_correct_log_table)
+  )
+)
+
+print(filtered_fit_check, row.names = FALSE)
+
+genus_not_in_fit <- subset(
+  genus_abundance_filter$taxon_report,
+  keep_for_analysis &
+    !(TaxonID %in% ancom2_genus_filtered_BH$res$taxon),
+  select = c(TaxonID, taxon_name, n_detected, pooled_abundance_percent)
+)
+
+print(genus_not_in_fit, row.names = FALSE)
+
+# Screening for structural zeroes
+screen_structural_zeros <- function(ps_obj, fit, rank_name) {
+  counts <- as(phyloseq::otu_table(ps_obj), "matrix")
+  if (!phyloseq::taxa_are_rows(ps_obj)) {
+    counts <- t(counts)
+  }
+
+  sample_ids <- colnames(fit$bias_correct_log_table)
+  meta <- data.frame(phyloseq::sample_data(ps_obj), check.names = FALSE)
+
+  stopifnot(
+    length(sample_ids) == 72L,
+    !anyDuplicated(sample_ids),
+    all(sample_ids %in% colnames(counts)),
+    all(sample_ids %in% rownames(meta))
+  )
+
+  counts <- counts[, sample_ids, drop = FALSE]
+  meta <- meta[sample_ids, , drop = FALSE]
+
+  stopifnot(
+    all(is.finite(counts)),
+    all(counts >= 0),
+    all(counts == round(counts))
+  )
+
+  treatment <- gsub("[^a-z]", "", tolower(as.character(meta$treatment)))
+  condition <- toupper(trimws(as.character(meta$condition)))
+
+  group <- factor(
+    paste(treatment, condition, sep = "/"),
+    levels = c("bbs/HC", "bbs/IS", "maurum/HC", "maurum/IS"),
+    labels = c("BBS/HC", "BBS/IS", "M. aurum/HC", "M. aurum/IS")
+  )
+
+  stopifnot(!anyNA(group), all(table(group) == 18L))
+
+  taxon_ids <- rownames(counts)
+  taxonomy <- as(phyloseq::tax_table(ps_obj), "matrix")
+  taxon_names <- as.character(taxonomy[taxon_ids, rank_name])
+  detected_total <- rowSums(counts > 0)
+
+  do.call(rbind, lapply(levels(group), function(g) {
+    in_group <- group == g
+    n_detected <- rowSums(counts[, in_group, drop = FALSE] > 0)
+    detected_elsewhere <- detected_total - n_detected
+    data.frame(
+      taxonomic_level = rank_name,
+      TaxonID = taxon_ids,
+      taxon_name = taxon_names,
+      group = g,
+      n_samples = sum(in_group),
+      n_detected = unname(n_detected),
+      n_zero = unname(sum(in_group) - n_detected),
+      n_detected_elsewhere = unname(detected_elsewhere),
+      structural_zero = unname(n_detected == 0 & detected_elsewhere > 0),
+      in_primary_results = taxon_ids %in% fit$res$taxon)
+  }))
+}
+
+structural_zero_screen <- dplyr::bind_rows(
+  screen_structural_zeros(
+    ps_phylum_filtered, ancom2_phylum_filtered_BH, "Phylum"),
+  screen_structural_zeros(
+    ps_genus_filtered, ancom2_genus_filtered_BH, "Genus")
+)
+
+# List the flagged taxa, their groups, and the observed counts
+structural_zero_flags <- structural_zero_screen %>%
+  dplyr::filter(structural_zero)
+
+# Count distinct taxa and taxon-by-group flags separately
+structural_zero_summary <- structural_zero_screen %>%
+  dplyr::group_by(taxonomic_level) %>%
+  dplyr::summarise(
+    taxa_screened = dplyr::n_distinct(TaxonID),
+    taxa_flagged = dplyr::n_distinct(TaxonID[structural_zero]),
+    taxon_group_flags = sum(structural_zero),
+    flags_among_primary_taxa = sum(structural_zero & in_primary_results),
+    .groups = "drop"
+  )
+
+print(structural_zero_summary)
+print(structural_zero_flags)
+```
+### ANCOM-BC2: Setting up table for main effects and interactions with the corrections for degrees of freedom alignment and results and lables for unsupported comparsions "Not estimable".
+```{r}
+# Extraction function 
+extract_ancombc2_table <- function(
+  ancom_obj,
+  ps_obj,
+  rank_name,
+  effect_name,
+  comparison_label,
+  reference_label,
+  comparison_group_label,
+  effect_type = "main"
+) {
+
+  res_df <- as.data.frame(ancom_obj$res)
+
+  tax_df <- as.data.frame(phyloseq::tax_table(ps_obj)) %>%
+    tibble::rownames_to_column("TaxonID")
+
+  lfc_col  <- paste0("lfc_", effect_name)
+  se_col   <- paste0("se_", effect_name)
+  stat_col <- paste0("W_", effect_name)
+  p_col    <- paste0("p_", effect_name)
+  q_col    <- paste0("q_", effect_name)
+  diff_col <- paste0("diff_", effect_name)
+  ss_col   <- paste0("passed_ss_", effect_name)
+
+  out <- res_df %>%
+    dplyr::rename(TaxonID = taxon) %>%
+    dplyr::left_join(tax_df, by = "TaxonID") %>%
+    dplyr::mutate(
+      taxonomic_level = rank_name,
+      taxon_name = as.character(.data[[rank_name]]),
+      comparison = comparison_label,
+      reference_group = reference_label,
+      comparison_group = comparison_group_label,
+      log_fold_change = .data[[lfc_col]],
+      standard_error = .data[[se_col]],
+      test_statistic = .data[[stat_col]],
+      p_value = .data[[p_col]],
+      fdr_q_value = .data[[q_col]],
+      differentially_abundant = .data[[diff_col]]
+    )
+
+# Apply phylum name updates
+  if (rank_name == "Phylum") {
+    out$taxon_name <- update_phylum_names(out$taxon_name)
+  }
+
+# Include pseudocount-sensitivity results
+if (!ss_col %in% colnames(out)) {
+  stop(paste("Sensitivity-analysis column is missing:", ss_col))
+}
+
+out$passed_sensitivity <- as.logical(out[[ss_col]])
+
+# Significant after FDR correction AND robust to pseudocount choice
+out$differentially_abundant_robust <-
+  !is.na(out$fdr_q_value) &
+  out$fdr_q_value < 0.05 &
+  (out$passed_sensitivity %in% TRUE)
+
+  # Direction labels
+  if (effect_type == "interaction") {
+
+    out <- out %>%
+      dplyr::mutate(
+        direction = dplyr::case_when(
+          log_fold_change > 0 ~ "Treatment effect higher under IS",
+          log_fold_change < 0 ~ "Treatment effect lower under IS",
+          TRUE ~ "No interaction"
+        )
+      )
+
+  } else {
+
+    out <- out %>%
+      dplyr::mutate(
+        direction = dplyr::case_when(
+          log_fold_change > 0 ~ paste0("Higher in ", comparison_group_label),
+          log_fold_change < 0 ~ paste0("Higher in ", reference_label),
+          TRUE ~ "No change"
+        )
+      )
+  }
+
+  out <- out %>%
+    dplyr::mutate(
+      significant_fdr_0.05 = dplyr::if_else(
+        !is.na(fdr_q_value) & fdr_q_value < 0.05,
+        "Yes",
+        "No"
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(taxon_name),
+      taxon_name != "",
+      !tolower(taxon_name) %in% c(
+        "na", "n/a", "uncultured", "unclassified",
+        "ambiguous_taxa", "gut_metagenome", "metagenome",
+        "unknown", "uncultured_bacterium", "uncultured_organism"
+      )
+    ) %>%
+    dplyr::mutate(
+      taxon_name = gsub("\\[|\\]", "", taxon_name),
+      log_fold_change = round(log_fold_change, 3),
+      standard_error = round(standard_error, 3),
+      test_statistic = round(test_statistic, 3),
+      p_value = signif(p_value, 3),
+      fdr_q_value = signif(fdr_q_value, 3)
+    ) %>%
+    dplyr::select(
+      taxonomic_level,
+      taxon_name,
+      comparison,
+      reference_group,
+      comparison_group,
+      log_fold_change,
+      standard_error,
+      test_statistic,
+      p_value,
+      fdr_q_value,
+      significant_fdr_0.05,
+      differentially_abundant_robust,
+      passed_sensitivity,
+      direction,
+      TaxonID
+    ) %>%
+    dplyr::arrange(
+      fdr_q_value,
+      dplyr::desc(abs(log_fold_change))
+    )
+
+  out
+}
+
+# Applying settings for the correction of the genus error
+extract_ancombc2_genus_table <- function(
+  ancom_obj,
+  ps_obj,
+  effect_name,
+  ...
+) {
+
+  if (!identical(list(...)$rank_name, "Genus")) {
+    stop("Use this reporting function only for Genus.")
+  }
+
+  res_df <- as.data.frame(ancom_obj$res)
+
+  counts <- as(phyloseq::otu_table(ps_obj), "matrix")
+
+  if (!phyloseq::taxa_are_rows(ps_obj)) {
+    counts <- t(counts)
+  }
+
+  meta <- data.frame(
+    phyloseq::sample_data(ps_obj),
+    check.names = FALSE
+  )
+
+  sample_ids <- colnames(ancom_obj$bias_correct_log_table)
+
+  if (is.null(sample_ids) || length(sample_ids) == 0L) {
+    stop("Cannot identify fitted samples in bias_correct_log_table.")
+  }
+
+  stopifnot(
+    all(sample_ids %in% colnames(counts)),
+    all(sample_ids %in% rownames(meta)),
+    all(res_df$taxon %in% rownames(counts))
+  )
+
+  counts <- counts[res_df$taxon, sample_ids, drop = FALSE]
+  meta <- meta[sample_ids, , drop = FALSE]
+
+  if (anyNA(meta[, c("treatment", "condition", "cohort")])) {
+    stop("Check missing values in the fitted sample metadata.")
+  }
+
+  sample_group <- paste(
+    as.character(meta$treatment),
+    as.character(meta$condition),
+    sep = "/"
+  )
+
+  expected_groups <- c(
+    "bbs/HC", "bbs/IS",
+    "maurum/HC", "maurum/IS"
+  )
+
+  stopifnot(setequal(unique(sample_group), expected_groups))
+
+  required_groups <- switch(
+    effect_name,
+    "treatmentmaurum" = c("bbs/HC", "maurum/HC"),
+    "conditionIS" = c("bbs/HC", "bbs/IS"),
+    "treatmentmaurum:conditionIS" = expected_groups,
+    stop("Unexpected genus effect_name.")
+  )
+
+# Count detections to assess estimate. No zeros or samples are removed from the original data.
+  supported <- Reduce(
+    `&`,
+    lapply(required_groups, function(g) {
+      rowSums(
+        counts[, sample_group == g, drop = FALSE] > 0
+      ) > 0
+    })
+  )
+
+  p_col <- paste0("p_", effect_name)
+  q_col <- paste0("q_", effect_name)
+  diff_col <- paste0("diff_", effect_name)
+  ss_col <- paste0("passed_ss_", effect_name)
+
+  statistic_columns <- paste0(
+    c("lfc_", "se_", "W_", "p_", "q_"),
+    effect_name
+  )
+
+  stopifnot(
+    all(c(statistic_columns, diff_col, ss_col) %in% names(res_df))
+  )
+
+# Preserve the full fitted taxon family for BH correction
+  p_for_bh <- res_df[[p_col]]
+  p_for_bh[!supported | !is.finite(p_for_bh)] <- 1
+
+  revised_q <- stats::p.adjust(p_for_bh, method = "BH")
+
+  old_significant <- (
+    is.finite(res_df[[q_col]]) &
+      res_df[[q_col]] < 0.05
+  )
+
+  new_significant <- revised_q < 0.05
+
+  if (any(supported & (old_significant != new_significant))) {
+    stop(
+      paste(
+        "FDR decisions changed for supported comparisons.",
+        "Review pseudocount sensitivity before reporting these results."
+      )
+    )
+  }
+
+  res_df[[q_col]] <- revised_q
+  res_df[[diff_col]] <- new_significant
+
+  unsupported_rows <- which(!supported)
+
+  if (length(unsupported_rows) > 0L) {
+    res_df[unsupported_rows, statistic_columns] <- NA_real_
+    res_df[[diff_col]][unsupported_rows] <- NA
+  }
+
+# Preserve the original fitted object
+  reporting_obj <- ancom_obj
+  reporting_obj$res <- res_df
+
+  out <- extract_ancombc2_table(
+    ancom_obj = reporting_obj,
+    ps_obj = ps_obj,
+    effect_name = effect_name,
+    ...
+  )
+
+  matched_rows <- match(out$TaxonID, res_df$taxon)
+  stopifnot(!anyNA(matched_rows))
+
+  unavailable <- !supported[matched_rows]
+
+  out$model_status <- ifelse(
+    unavailable,
+    "Not estimable",
+    "Estimable by design"
+  )
+
+  out$significant_fdr_0.05[unavailable] <- "Not estimable"
+  out$differentially_abundant_robust[unavailable] <- NA
+  out$passed_sensitivity[unavailable] <- NA
+  out$direction[unavailable] <- "Not estimable"
+
+  out %>%
+    dplyr::relocate(model_status, .before = log_fold_change)
+}
+
+# updating phylum names 
+update_phylum_names <- function(x) {
+  dplyr::case_when(
+    x == "Firmicutes" ~ "Bacillota",
+    x %in% c("Bacteroidetes", "Bacteroidota") ~ "Bacteroidota",
+    x == "Proteobacteria" ~ "Pseudomonadota",
+    x %in% c("Actinobacteria", "Actinobacteriota") ~ "Actinomycetota",
+    x == "Fusobacteria" ~ "Fusobacteriota",
+    x == "Lentisphaerae" ~ "Lentisphaerota",
+    x == "Tenericutes" ~ "Mycoplasmatota",
+    x == "Synergistetes" ~ "Synergistota",
+    x == "Verrucomicrobia" ~ "Verrucomicrobiota",
+    TRUE ~ x
+  )
+} 
+```
+### ANCOM-BC2: Make tables with filtering (>0.01%) and export for manuscript (Supplement table S5)
+```{r}
+phylum_treatment_table <- extract_ancombc2_table(
+  ancom_obj = ancom2_phylum_filtered_BH,
+  ps_obj = ps_phylum_filtered,
+ rank_name = "Phylum",
+  effect_name = "treatmentmaurum",
+  comparison_label = "Treatment (BBS v. M.aurum)",
+  reference_label = "BBS",
+  comparison_group_label = "M. aurum",
+  effect_type = "main")
+
+phylum_condition_table <- extract_ancombc2_table(
+  ancom_obj = ancom2_phylum_filtered_BH,
+  ps_obj = ps_phylum_filtered,
+rank_name = "Phylum",
+  effect_name = "conditionIS",
+  comparison_label = "Stress/Condition (HC v. IS)",
+  reference_label = "HC",
+  comparison_group_label = "IS",
+  effect_type = "main")
+
+phylum_interaction_table <- extract_ancombc2_table(
+  ancom_obj = ancom2_phylum_filtered_BH,
+  ps_obj = ps_phylum_filtered,
+  rank_name = "Phylum",
+  effect_name = "treatmentmaurum:conditionIS",
+  comparison_label = "Treatment x Stress interaction",
+  reference_label = "Treatment contrast under HC ",
+  comparison_group_label = "Treatment contrast under IS",
+  effect_type = "interaction")
+
+genus_treatment_table <- extract_ancombc2_genus_table(
+  ancom_obj = ancom2_genus_filtered_BH,
+  ps_obj = ps_genus_filtered,
+    rank_name = "Genus",
+  effect_name = "treatmentmaurum",
+  comparison_label = "Treatment (BBS v. M. aurum)",
+  reference_label = "BBS",
+  comparison_group_label = "M.aurum",
+  effect_type = "main")
+
+genus_condition_table <- extract_ancombc2_genus_table(
+  ancom_obj = ancom2_genus_filtered_BH,
+  ps_obj = ps_genus_filtered,
+  rank_name = "Genus",
+  effect_name = "conditionIS",
+  comparison_label = "Stress/Condition (HC v. IS)",
+  reference_label = "HC",
+  comparison_group_label = "IS",
+  effect_type = "main")
+
+genus_interaction_table <- extract_ancombc2_genus_table(
+  ancom_obj = ancom2_genus_filtered_BH,
+  ps_obj = ps_genus_filtered,
+    rank_name = "Genus",
+  effect_name = "treatmentmaurum:conditionIS",
+  comparison_label = "Treatment x Stress interaction",
+  reference_label = "Treatment contrast under HC",
+  comparison_group_label = "Treatment contrast under IS",
+  effect_type = "interaction")
+
+ancombc2_publication_table <- dplyr::bind_rows(
+  phylum_treatment_table,
+  phylum_condition_table,
+  phylum_interaction_table,
+  genus_treatment_table,
+  genus_condition_table,
+  genus_interaction_table)
+
+# Exporting tables to Excel
+dir.create("R_tables", showWarnings = FALSE)
+
+wb <- openxlsx::createWorkbook()
+
+openxlsx::addWorksheet(wb, "Phylum_Treatment")
+openxlsx::writeData(
+  wb,
+  "Phylum_Treatment",
+  phylum_treatment_table
+)
+
+openxlsx::addWorksheet(wb, "Phylum_Condition")
+openxlsx::writeData(
+  wb,
+  "Phylum_Condition",
+  phylum_condition_table
+)
+
+openxlsx::addWorksheet(wb, "Phylum_Interaction")
+openxlsx::writeData(
+  wb,
+  "Phylum_Interaction",
+  phylum_interaction_table
+)
+
+openxlsx::addWorksheet(wb, "Genus_Treatment")
+openxlsx::writeData(
+  wb,
+  "Genus_Treatment",
+  genus_treatment_table
+)
+
+openxlsx::addWorksheet(wb, "Genus_Condition")
+openxlsx::writeData(
+  wb,
+  "Genus_Condition",
+  genus_condition_table
+)
+
+openxlsx::addWorksheet(wb, "Genus_Interaction")
+openxlsx::writeData(
+  wb,
+  "Genus_Interaction",
+  genus_interaction_table
+)
+
+openxlsx::addWorksheet(wb, "Combined")
+openxlsx::writeData(
+  wb,
+  "Combined",
+  ancombc2_publication_table
+)
+
+header_style <- openxlsx::createStyle(
+  textDecoration = "bold",
+  fgFill = "#D9EAF7",
+  border = "Bottom"
+)
+
+for (sheet in names(wb)) {
+  openxlsx::addStyle(
+    wb,
+    sheet,
+    style = header_style,
+    rows = 1,
+    cols = 1:ncol(
+      openxlsx::readWorkbook(wb, sheet = sheet)
+    ),
+    gridExpand = TRUE
+  )
+
+  openxlsx::freezePane(
+    wb,
+    sheet,
+    firstRow = TRUE
+  )
+
+  openxlsx::setColWidths(
+    wb,
+    sheet,
+    cols = 1:20,
+    widths = "auto"
+  )
+}
+
+openxlsx::saveWorkbook(
+  wb,
+  file = "R_tables/ANCOMBC2_2x2_factorial_phylum_genus_tables.xlsx",
+  overwrite = TRUE
+)
+```
+## Relative Abundance: Phylum (Figure 5)
+```{r}
+#Make sure to do parsed taxonomy ranks from the ASV code above before doing this step
+#naming a critical object
+pseq <- ps_asv
+
+# Re-number cohorts from metadata 
+cohort_map <- c(
+  "0" = "1",
+  "1" = "2",
+  "2" = "3",
+  "3" = "4",
+  "4" = "5",
+  "5" = "6")
+
+cohort_original <- trimws(
+  as.character(sample_data(pseq)$cohort)
+)
+
+if (anyNA(cohort_original) ||
+    !setequal(unique(cohort_original), names(cohort_map))) {
+  stop("Expected original cohorts 0–5.")
+}
+
+sample_data(pseq)$cohort <- factor(
+  unname(cohort_map[cohort_original]),
+  levels = as.character(1:6)
+)
+
+# Point shapes for cohorts
+cohort_shapes <- c(
+  "1" = 16,  # Solid circle
+  "2" = 1,   # Open circle
+  "3" = 15,  # Solid square
+  "4" = 0,   # Open square
+  "5" = 17,   # Solid triangle
+  "6" = 2    # Open triangle
+)
+
+# Build clean sample group labels
+group_levels <- c(
+  "BBS/HC", "BBS/IS",
+  "M. aurum/HC", "M. aurum/IS")
+
+sample_data(pseq)$experimental_group <- factor(
+  dplyr::recode(
+    as.character(sample_data(pseq)$experimental_group),
+    "bbs.HC" = "BBS/HC",
+    "bbs.IS" = "BBS/IS",
+    "maurum.HC" = "M. aurum/HC",
+    "maurum.IS" = "M. aurum/IS"), levels = group_levels)
+
+# Agglomerate at phylum level
+pseq_phylum <- tax_glom(pseq, taxrank = "Phylum", NArm = FALSE)
+
+# Transform to relative abundance
+pseq_phylum_rel <- transform_sample_counts(pseq_phylum, function(x) x / sum(x))
+
+# Melt to long format
+phylum_df <- psmelt(pseq_phylum_rel)
+
+# Clean phylum labels
+  phylum_df <- phylum_df %>%
+  dplyr::mutate(
+    Phylum = as.character(Phylum),
+    Phylum = dplyr::case_when(
+      is.na(Phylum) ~ "Unclassified",
+      Phylum == "" ~ "Unclassified",
+      tolower(Phylum) %in% c("uncultured", "unclassified", "ambiguous_taxa", "unknown") ~ "Unclassified",
+      Phylum == "Firmicutes" ~ "Bacillota",
+      Phylum %in% c("Actinobacteria", "Actinobacteriota") ~ "Actinomycetota",
+      Phylum == "Proteobacteria" ~ "Pseudomonadota",
+      TRUE ~ Phylum,
+      Phylum == "Verrucomicrobia" ~ "Verrucomicrobiota",)
+  )
+
+# Select the two phyla for descriptive display
+# Retain all abundance values, including zeros
+phylum_plot_df <- phylum_df %>%
+  dplyr::filter(
+    Phylum %in% c("Actinomycetota", "Verrucomicrobiota")
+  ) %>%
+  dplyr::group_by(Sample, Phylum, experimental_group, cohort) %>%
+  dplyr::summarise(
+    Abundance = sum(Abundance),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    experimental_group = factor(
+      experimental_group,
+      levels = group_levels
+    )
+  )
+
+# Calculate arithmetic means and SEM before transforming the display axis
+# Zero values contribute to these calculations
+phylum_summary <- phylum_plot_df %>%
+  dplyr::group_by(Phylum, experimental_group) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    n_zero = sum(Abundance == 0),
+    mean_abundance = mean(Abundance),
+    sem_abundance = sd(Abundance) / sqrt(dplyr::n()),
+    .groups = "drop"
+  )
+
+# Use positive values ONLY to choose the plotting offset.
+# phylum_plot_df still contains every observation, including zeros.
+offset_reference <- phylum_plot_df$Abundance[
+  is.finite(phylum_plot_df$Abundance) &
+    phylum_plot_df$Abundance > 0
+]
+
+if (length(offset_reference) == 0L) {
+  stop("A positive plotting offset must be specified: all abundances are zero.")
+}
+
+# One common offset for both phyla
+log_offset <- min(offset_reference) / 2
+
+# Display transformation: log10(abundance + offset)
+log10_offset_axis <- local({
+  offset <- log_offset
+
+  scales::trans_new(
+    name = "log10_with_offset",
+    transform = function(x) log10(x + offset),
+    inverse = function(y) pmax(0, 10^y - offset),
+    domain = c(0, Inf)
+  )
+})
+
+cat("Plotting offset =", log_offset, "in relative-abundance units\n")
+
+# Four-group colors
+group_colors <- c(
+  "BBS/HC" = "#B3E1F0",
+  "BBS/IS" = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+
+# Italicized M. aurum labels
+group_labels <- expression(
+  "BBS/HC",
+  "BBS/IS",
+  italic("M. aurum") * "/HC",
+  italic("M. aurum") * "/IS"
+)
+
+# Format q-values
+format_fdr_q <- function(q) {
+  if (q < 0.001) {
+    formatC(q, format = "e", digits = 2)
+  } else {
+    sprintf("%.4f", q)
+  }
+}
+
+# Setting up filtering systems
+filtered_figure_label <- function(results, fit, taxon, contrast) {
+
+  if (!all(results$TaxonID %in% fit$res$taxon)) {
+    stop("Rebuild the publication table from the filtered BH fit.")
+  }
+
+  result <- dplyr::filter(
+    results,
+    .data$taxon_name == taxon
+  )
+
+  if (nrow(result) != 1L) {
+    stop("Expected one result row for: ", taxon)
+  }
+
+  # Preserve unavailable genus comparisons
+  if ("model_status" %in% names(result) &&
+      isTRUE(result$model_status[[1]] == "Not estimable")) {
+    return(sprintf('"%s: not estimable"', contrast))
+  }
+
+  q <- result$fdr_q_value[[1]]
+
+  if (!is.finite(q) || q < 0 || q > 1) {
+    stop("Missing or invalid BH q-value for: ", taxon)
+  }
+
+  q_text <- if (q < 0.001) {
+    formatC(q, format = "e", digits = 2)
+  } else {
+    sprintf("%.4f", q)
+  }
+
+  passed <- as.logical(result$passed_sensitivity[[1]])
+
+  sensitivity_text <- if (is.na(passed)) {
+    "unavailable"
+  } else if (passed) {
+    "passed"
+  } else {
+    "not passed"
+  }
+
+  sprintf(
+    'paste("%s: FDR ", italic(q), " = %s; pseudocount sensitivity: %s")',
+    contrast,
+    q_text,
+    sensitivity_text
+  )
+}
+
+# Build annotations from the updated ANCOM-BC2 tables and incorporating filtering systems 
+make_phylum_annotation <- function(
+  results, phylum, comparison, vertical_position
+) {
+  data.frame(
+    Phylum = phylum,
+    label = filtered_figure_label(
+      results,
+      ancom2_phylum_filtered_BH,
+      phylum,
+      comparison
+    ),
+    vertical_position = vertical_position
+  )
+}
+
+# Build annotations outside the function
+phylum_annotations <- dplyr::bind_rows(
+  make_phylum_annotation(
+    phylum_treatment_table,
+    "Actinomycetota",
+    "Treatment (HC)",
+    1.4
+  ),
+
+  make_phylum_annotation(
+    phylum_treatment_table,
+    "Verrucomicrobiota",
+    "Treatment (HC)",
+    1.4
+  ),
+
+  make_phylum_annotation(
+    phylum_condition_table,
+    "Verrucomicrobiota",
+    "Condition (BBS)",
+    3.1
+  )
+)
+
+# Function to make one four-group phylum panel
+make_phylum_panel <- function(phylum_name) {
+
+  animal_data <- phylum_plot_df %>%
+    dplyr::filter(Phylum == phylum_name)
+
+  summary_data <- phylum_summary %>%
+    dplyr::filter(Phylum == phylum_name)
+
+  annotation_data <- phylum_annotations %>%
+    dplyr::filter(Phylum == phylum_name)
+
+  ggplot(
+    animal_data,
+    aes(
+      x = experimental_group,
+      fill = experimental_group)
+  ) +
+
+# Mean bars anchored at zero abundance
+geom_rect(
+  data = summary_data,
+  aes(
+    xmin = as.numeric(experimental_group) - 0.3,
+    xmax = as.numeric(experimental_group) + 0.3,
+    ymin = 0,
+    ymax = mean_abundance,
+    fill = experimental_group
+  ),
+  inherit.aes = FALSE,
+  color = "black",
+  linewidth = 0.6
+) +
+
+# Mean +/- SEM on the original abundance scale
+    geom_errorbar(
+      data = summary_data,
+      aes(
+        ymin = pmax(0, mean_abundance - sem_abundance),
+        ymax = mean_abundance + sem_abundance),
+      width = 0.18,
+      linewidth = 0.6,
+      show.legend = FALSE
+    ) +
+
+# Every sample, including zero-abundance samples. Horizontal jitter only. Cohort labeling
+ geom_point(
+  aes(y = Abundance, shape = cohort),
+  position = position_jitter(
+    width = 0.12,
+    height = 0,
+    seed = 1234),
+  size = 2.5,
+  stroke = 0.7,
+  alpha = 0.9,
+  color = "black",
+  show.legend = c(shape = TRUE, fill = FALSE)
+) +
+  facet_wrap(~ Phylum) +
+ 
+# Log10 transformation with an offset; zeros remain included
+scale_y_continuous(
+  trans = log10_offset_axis,
+  limits = c(0, NA),
+  breaks = c(
+    0, 0.0001, 0.001,
+    0.01, 0.1, 1),
+  labels = c(
+    "0%", "0.01%", "0.1%",
+    "1%", "10%", "100%"),
+  expand = expansion(mult = c(0, 0.15))
+) +
+    scale_x_discrete(
+      limits = group_levels,
+      labels = group_labels,
+      drop = FALSE
+    ) +
+scale_fill_manual(
+  values = group_colors,
+  breaks = group_levels,
+  labels = group_labels,
+  name = "Experimental Group",
+  drop = FALSE
+) +
+ scale_shape_manual(
+  values = cohort_shapes,
+  breaks = names(cohort_shapes),
+  labels = paste("Cohort", names(cohort_shapes)),
+  name = "Cohort",
+  drop = FALSE
+) +
+guides(
+  fill = guide_legend(order = 1, nrow = 1),
+  shape = guide_legend(
+    order = 2,
+    nrow = 1,
+    override.aes = list(
+      color = "black",
+      size = 3,
+      alpha = 1)
+  )
+) +
+    geom_text(
+      data = annotation_data,
+      aes(
+        x = 2.5,
+        y = Inf,
+        label = label,
+        vjust = vertical_position),
+      inherit.aes = FALSE,
+      parse = TRUE,
+      hjust = 0.5,
+      size = 3.5
+    ) +
+    labs(
+      x = NULL,
+      y = "Relative abundance (%, log10 transformation scale)"
+    ) +
+
+    theme_bw() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(size = 13, face = "bold"),
+      axis.text.x = element_text(size = 12, color = "black"),
+      axis.text.y = element_text(size = 11, color = "black"),
+      axis.title.y = element_text(size = 13, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_text(size = 12, face = "bold"),
+      legend.text = element_text(size = 11),
+      legend.box = "vertical"
+    )
+}
+
+# Build the panels with the all filtered BH annotations
+phylum_A <- make_phylum_panel("Actinomycetota")
+phylum_B <- make_phylum_panel("Verrucomicrobiota")
+
+# Check that each panel retains all animals and zero observations
+check_phylum_points <- function(plot, phylum_name) {
+  abundance <- phylum_plot_df$Abundance[
+    phylum_plot_df$Phylum == phylum_name
+  ]
+
+# Points are the third layer: bars, error bars, then points
+  point_y <- ggplot2::ggplot_build(plot)$data[[3]]$y
+  data.frame(
+    Phylum = phylum_name,
+    observations_in_data = length(abundance),
+    observations_plotted = sum(is.finite(point_y)),
+    zeros_in_data = sum(abundance == 0),
+    zeros_plotted = sum(
+      abs(point_y - log10(log_offset)) < 1e-10,
+      na.rm = TRUE
+    )
+  )
+}
+
+phylum_plot_check <- rbind(
+  check_phylum_points(phylum_A, "Actinomycetota"),
+  check_phylum_points(phylum_B, "Verrucomicrobiota")
+)
+
+stopifnot(
+  all(phylum_plot_check$observations_in_data == 72L),
+  all(phylum_plot_check$observations_plotted == 72L),
+  all(phylum_plot_check$zeros_in_data == phylum_plot_check$zeros_plotted)
+)
+
+# Combine panels with one shared legend
+phylum_2x2_figure <- ggpubr::ggarrange(
+  phylum_A,
+  phylum_B,
+  labels = c("A", "B"),
+  ncol = 2,
+  nrow = 1,
+  align = "hv",
+  common.legend = TRUE,
+  legend = "bottom",
+  font.label = list(size = 25, face = "bold"),
+  label.x = 0.02,
+  label.y = 0.98)
+
+# Export under a new name to preserve the previous TIFF
+dir.create("R_figures", recursive = TRUE, showWarnings = FALSE)
+
+ggplot2::ggsave(
+  filename = "R_figures/phylum_ANCOMBC2_four_groups_filtered_BH.tiff",
+  plot = phylum_2x2_figure,
+  device = "tiff",
+  width = 13,
+  height = 6.5,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white"
+)
+```
+## Relative Abundance: Genus (Figure 4)
+```{r}
+# Agglomerate to Genus
+pseq_genus <- tax_glom(
+  ps_asv,
+  taxrank = "Genus",
+  NArm = FALSE)
+
+# Transform to relative abundance
+pseq_genus_rel <- transform_sample_counts(
+  pseq_genus,
+  function(x) x / sum(x)
+)
+
+# Melt to long format
+genus_df <- psmelt(pseq_genus_rel)
+
+
+# Treatment labels and making sure that it's defined in the plot section 
+genus_df <- genus_df %>%
+  dplyr::mutate(
+
+    # Standardize original treatment names
+    treatment_clean = gsub(
+      "[^a-z]",
+      "",
+      tolower(as.character(treatment))
+    ),
+
+    treatment = dplyr::case_when(
+      treatment_clean == "bbs" ~ "BBS",
+      treatment_clean == "maurum" ~ "M. aurum",
+      TRUE ~ NA_character_
+    ),
+
+# Standardize stress condition
+    condition = toupper(
+      trimws(as.character(condition))
+    ),
+
+# Convert to factors
+    treatment = factor(
+      treatment,
+      levels = c("BBS", "M. aurum")
+    ),
+    condition = factor(
+      condition,
+      levels = c("HC", "IS")
+    ),
+
+# Recreate experimental groups
+    experimental_group = factor(
+      paste(treatment, condition, sep = "/"),
+      levels = c(
+        "BBS/HC",
+        "BBS/IS",
+        "M. aurum/HC",
+        "M. aurum/IS")
+    )
+  ) %>%
+  dplyr::select(-treatment_clean)
+
+# Clean genus names
+genus_df <- genus_df %>%
+  dplyr::mutate(
+    Genus = as.character(Genus),
+    Genus = dplyr::case_when(
+      is.na(Genus) ~ "Unclassified",
+      Genus == "" ~ "Unclassified",
+      tolower(Genus) %in% c(
+        "uncultured",
+        "unclassified",
+        "ambiguous_taxa",
+        "gut_metagenome",
+        "metagenome",
+        "unknown",
+        "na",
+        "n/a"
+      ) ~ "Unclassified",
+     TRUE ~ Genus),
+    Genus = gsub("\\[|\\]", "", Genus)
+  )
+
+# Genus to display
+genera_to_plot <- "Bifidobacterium"
+
+# Same experimental group colors and cohort symbols as the phylum figure
+genus_group_levels <- c("BBS/HC", "BBS/IS", "M. aurum/HC", "M. aurum/IS")
+
+genus_group_map <- c(
+  "bbs/HC" = "BBS/HC",
+  "bbs/IS" = "BBS/IS",
+  "maurum/HC" = "M. aurum/HC",
+  "maurum/IS" = "M. aurum/IS"
+)
+
+genus_group_colors <- c(
+  "BBS/HC" = "#B3E1F0",
+  "BBS/IS" = "#148CBA",
+  "M. aurum/HC" = "#98E0B1",
+  "M. aurum/IS" = "#21A951"
+)
+
+genus_group_labels <- expression(
+  "BBS/HC", "BBS/IS",
+  italic("M. aurum") * "/HC",
+  italic("M. aurum") * "/IS"
+)
+
+genus_cohort_shapes <- c("1" = 16, "2" = 1, "3" = 15,
+                         "4" = 0, "5" = 17, "6" = 2)
+
+# Use the original, unfiltered genus counts for plotting
+genus_plot_ps <- ps_genus
+genus_fit_samples <- colnames(ancom2_genus_filtered_BH$bias_correct_log_table)
+
+stopifnot(
+  length(genus_fit_samples) == 72L,
+  setequal(phyloseq::sample_names(genus_plot_ps), genus_fit_samples),
+  "model_status" %in% names(genus_treatment_table),
+  all(genus_treatment_table$TaxonID %in% ancom2_genus_filtered_BH$res$taxon)
+)
+
+# Build experimental group labels on the plotting copy
+genus_group_key <- paste(
+  gsub("[^a-z]", "", tolower(as.character(sample_data(genus_plot_ps)$treatment))),
+  toupper(trimws(as.character(sample_data(genus_plot_ps)$condition))),
+  sep = "/"
+)
+
+stopifnot(all(genus_group_key %in% names(genus_group_map)))
+
+sample_data(genus_plot_ps)$experimental_group <- factor(
+  unname(genus_group_map[genus_group_key]),
+  levels = genus_group_levels
+)
+
+# Display original cohorts 0–5 as cohorts 1–6
+genus_cohort <- trimws(as.character(sample_data(genus_plot_ps)$cohort))
+
+if (setequal(unique(genus_cohort), as.character(0:5))) {
+  genus_cohort <- as.character(as.integer(genus_cohort) + 1L)
+} else if (!setequal(unique(genus_cohort), as.character(1:6))) {
+  stop("Expected six cohorts labeled either 0–5 or 1–6.")
+}
+
+sample_data(genus_plot_ps)$cohort <- factor(
+  genus_cohort,
+  levels = as.character(1:6)
+)
+
+# Match Bifidobacterium by TaxonID, regardless of its q-value
+genus_result <- genus_treatment_table %>%
+  dplyr::filter(.data$taxon_name == genera_to_plot)
+
+if (nrow(genus_result) != 1L) {
+  stop("Expected one Bifidobacterium row in the filtered genus treatment table.")
+}
+
+genus_taxon_id <- as.character(genus_result$TaxonID[[1L]])
+
+# Calculate relative abundance using all genera, then select Bifidobacterium
+stopifnot(all(phyloseq::sample_sums(genus_plot_ps) > 0))
+
+genus_plot_rel <- phyloseq::transform_sample_counts(
+  genus_plot_ps,
+  function(x) x / sum(x)
+)
+
+genus_plot_df <- phyloseq::psmelt(genus_plot_rel) %>%
+  dplyr::filter(as.character(.data$OTU) == genus_taxon_id) %>%
+  dplyr::mutate(Genus = factor(genera_to_plot, levels = genera_to_plot))
+
+stopifnot(
+  nrow(genus_plot_df) == 72L,
+  !anyDuplicated(genus_plot_df$Sample),
+  setequal(genus_plot_df$Sample, genus_fit_samples),
+  all(is.finite(genus_plot_df$Abundance)),
+  all(genus_plot_df$Abundance >= 0)
+)
+
+# Calculate means and SEM on the original scale, including zeros
+genus_summary <- genus_plot_df %>%
+  dplyr::group_by(Genus, experimental_group) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean_abundance = mean(Abundance),
+    sem_abundance = stats::sd(Abundance) / sqrt(dplyr::n()),
+    .groups = "drop"
+  )
+
+stopifnot(nrow(genus_summary) == 4L, all(genus_summary$n == 18L))
+
+# Use positive values only to choose the display offset
+genus_positive <- genus_plot_df$Abundance[genus_plot_df$Abundance > 0]
+if (length(genus_positive) == 0L) {
+  stop("Bifidobacterium has only zero abundances.")
+}
+
+genus_log_offset <- min(genus_positive) / 2
+
+genus_log10_axis <- local({
+  offset <- genus_log_offset
+  scales::trans_new(
+    name = "genus_log10_offset",
+    transform = function(x) log10(x + offset),
+    inverse = function(y) pmax(0, 10^y - offset),
+    domain = c(0, Inf)
+  )
+})
+
+message("Genus display offset: ", format(genus_log_offset, scientific = TRUE))
+
+# Build the filtered BH annotations
+if (isTRUE(genus_result$model_status[[1L]] == "Not estimable")) {
+  genus_label <- '"Treatment (HC): not estimable"'
+} else {
+  q <- genus_result$fdr_q_value[[1L]]
+  stopifnot(is.finite(q), q >= 0, q <= 1)
+
+  q_text <- if (q < 0.001) {
+    formatC(q, format = "e", digits = 2)
+  } else {
+    sprintf("%.4f", q)
+  }
+
+  passed <- as.logical(genus_result$passed_sensitivity[[1L]])
+  sensitivity_text <- if (is.na(passed)) {
+    "unavailable"
+  } else if (passed) {
+    "passed"
+  } else {
+    "not passed"
+  }
+
+  genus_label <- sprintf(
+    'paste("Treatment (HC): FDR ", italic(q), " = %s; pseudocount sensitivity: %s")',
+    q_text, sensitivity_text
+  )
+}
+
+genus_annotations <- data.frame(
+  Genus = factor(genera_to_plot, levels = genera_to_plot),
+  label = genus_label
+)
+
+# Build the genus panel
+genus_figure <- ggplot(
+  genus_plot_df,
+  aes(x = experimental_group, fill = experimental_group)
+) +
+  geom_rect(
+    data = genus_summary,
+    aes(
+      xmin = as.numeric(experimental_group) - 0.3,
+      xmax = as.numeric(experimental_group) + 0.3,
+      ymin = 0,
+      ymax = mean_abundance,
+      fill = experimental_group
+    ),
+    inherit.aes = FALSE,
+    color = "black",
+    linewidth = 0.6
+  ) +
+  geom_errorbar(
+    data = genus_summary,
+    aes(
+      ymin = pmax(0, mean_abundance - sem_abundance),
+      ymax = mean_abundance + sem_abundance
+    ),
+    width = 0.18,
+    linewidth = 0.6,
+    show.legend = FALSE
+  ) +
+  geom_point(
+    aes(y = Abundance, shape = cohort),
+    position = position_jitter(width = 0.12, height = 0, seed = 1234),
+    size = 2.5,
+    stroke = 0.7,
+    alpha = 0.9,
+    color = "black",
+    show.legend = c(shape = TRUE, fill = FALSE)
+  ) +
+  facet_wrap(~ Genus) +
+  scale_y_continuous(
+    trans = genus_log10_axis,
+    limits = c(0, NA),
+    breaks = c(0, 0.0001, 0.001, 0.01, 0.1, 1),
+    labels = c("0%", "0.01%", "0.1%", "1%", "10%", "100%"),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  scale_x_discrete(
+    limits = genus_group_levels,
+    labels = genus_group_labels,
+    drop = FALSE
+  ) +
+  scale_fill_manual(
+    values = genus_group_colors,
+    breaks = genus_group_levels,
+    labels = genus_group_labels,
+    name = "Experimental Group",
+    drop = FALSE
+  ) +
+  scale_shape_manual(
+    values = genus_cohort_shapes,
+    breaks = names(genus_cohort_shapes),
+    labels = paste("Cohort", names(genus_cohort_shapes)),
+    name = "Cohort",
+    drop = FALSE
+  ) +
+  geom_text(
+    data = genus_annotations,
+    aes(x = 2.5, y = Inf, label = label),
+    inherit.aes = FALSE,
+    parse = TRUE,
+    hjust = 0.5,
+    vjust = 1.4,
+    size = 3.5
+  ) +
+  guides(
+    fill = guide_legend(order = 1, nrow = 1),
+    shape = guide_legend(
+      order = 2,
+      nrow = 1,
+      override.aes = list(color = "black", size = 3, alpha = 1)
+    )
+  ) +
+  coord_cartesian(clip = "off") +
+  labs(x = NULL, y = "Relative abundance (%, log10 transformation scale)") +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 13, face = "bold.italic"),
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 11, color = "black"),
+    axis.title.y = element_text(size = 13, face = "bold"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 11),
+    legend.box = "vertical")
+
+# Check the point layer before exporting
+genus_point_y <- ggplot2::ggplot_build(genus_figure)$data[[3L]]$y
+
+genus_plot_check <- data.frame(
+  observations_in_data = nrow(genus_plot_df),
+  observations_plotted = sum(is.finite(genus_point_y)),
+  zeros_in_data = sum(genus_plot_df$Abundance == 0),
+  zeros_plotted = sum(
+    abs(genus_point_y - log10(genus_log_offset)) < 1e-10,
+    na.rm = TRUE)
+)
+
+stopifnot(
+  genus_plot_check$observations_plotted == 72L,
+  genus_plot_check$zeros_in_data == genus_plot_check$zeros_plotted)
+
+# Export under a new name to preserve the earlier figure
+dir.create("R_figures", recursive = TRUE, showWarnings = FALSE)
+
+ggplot2::ggsave(
+  filename = "R_figures/genus_ANCOMBC2_four_groups_filtered_BH.tiff",
+  plot = genus_figure,
+  device = "tiff",
+  width = 8,
+  height = 6.5,
+  units = "in",
+  dpi = 600,
+  compression = "lzw",
+  bg = "white")
+```
+################################################################################
+# Additional Analyses: Low-abundance, and Differential Prevalance 
+################################################################################
+## Low-abundance detected or not detected samples 
+```{r}
+make_filtered_detection_table <- function(ps_original, fit, rank_name, filter_report) {
+  # Calculate within-sample percentages using all original reads
+  detections <- summarize_taxon_detections(
+    ps_obj = ps_original,
+    ancom_obj = fit,
+    rank_name = rank_name,
+    low_cutoff = 0.0001
+  )
+
+# Use the existing pooled filter decisions to select taxa for reporting
+  retained <- filter_report %>%
+    dplyr::filter(keep_for_analysis) %>%
+    dplyr::select(TaxonID, pooled_abundance_percent)
+
+  out <- detections %>%
+    dplyr::inner_join(retained, by = "TaxonID") %>%
+    dplyr::mutate(
+      in_ancombc2_results = TaxonID %in% fit$res$taxon
+    )
+
+  stopifnot(setequal(out$TaxonID, retained$TaxonID))
+  out
+}
+
+phylum_detection_table <- make_filtered_detection_table(
+  ps_phylum, ancom2_phylum_filtered_BH, "Phylum",
+  phylum_abundance_filter$taxon_report)
+
+genus_detection_table <- make_filtered_detection_table(
+  ps_genus, ancom2_genus_filtered_BH, "Genus",
+  genus_abundance_filter$taxon_report)
+
+detection_overall <- dplyr::bind_rows(
+  phylum_detection_table,
+  genus_detection_table
+) %>%
+  dplyr::group_by(taxonomic_level) %>%
+  dplyr::summarise(
+    taxa_after_pooled_filter = dplyr::n_distinct(TaxonID),
+    taxa_in_ancombc2_results = dplyr::n_distinct(TaxonID[in_ancombc2_results]),
+    taxon_sample_observations = sum(n_samples),
+    zero_observations = sum(n_zero),
+    low_positive_observations = sum(n_low_abundance),
+    .groups = "drop")
+
+pooled_filter_audit <- dplyr::bind_rows(
+  phylum_abundance_filter$taxon_report,
+  genus_abundance_filter$taxon_report)
+
+detection_definitions <- data.frame(
+  Measure = c(
+    "Pooled abundance filter",
+    "Within-sample low abundance",
+    "Observed zero",
+    "In ANCOM-BC2 results"
+  ),
+  Definition = c(
+    "Taxa with pooled abundance below 0.01% were excluded from the detection sheets.",
+    "Positive relative abundance at or below 0.01%, calculated using the original sample read total.",
+    "No reads observed for the taxon in that sample; counted separately from low positive values.",
+    "Taxon was returned in the primary filtered BH results."
+  )
+)
+
+print(detection_overall)
+
+dir.create("R_tables", showWarnings = FALSE)
+
+openxlsx::write.xlsx(
+  list(
+    Overall_Summary = detection_overall,
+    Phylum_Detections = phylum_detection_table,
+    Genus_Detections = genus_detection_table,
+    Pooled_Filter_Audit = pooled_filter_audit,
+    Definitions = detection_definitions
+  ),
+  file = "R_tables/Maurum_zero_low_abundance_filtered_0p01.xlsx",
+  overwrite = TRUE
+)
+```
+## Structural Zeroes- adding to Low-abundance table (Supplement table S6)
+```{r}
+input_file <- "R_tables/Maurum_zero_low_abundance_filtered_0p01.xlsx"
+output_file <- "R_tables/Maurum_zero_low_abundance_filtered_0p01_structural_zeros.xlsx"
+
+wb_combined <- openxlsx::loadWorkbook(input_file)
+
+# Standardize group labels for matching only
+normalize_group <- function(x) {
+  gsub("[^a-z0-9]", "", tolower(as.character(x)))
+}
+
+for (rank_name in c("Phylum", "Genus")) {
+  sheet <- paste0(rank_name, "_Detections")
+  detections <- openxlsx::read.xlsx(input_file, sheet = sheet)
+
+  group_col <- names(detections)[
+    normalize_group(names(detections)) %in% c("group", "experimentalgroup")
+  ]
+
+  if (length(group_col) != 1L) {
+    stop("Expected one experimental group column in ", sheet, ".")
+  }
+
+  screen <- structural_zero_screen[
+    structural_zero_screen$taxonomic_level == rank_name, ,
+    drop = FALSE
+  ]
+
+  detection_key <- paste(
+    detections$TaxonID,
+    normalize_group(detections[[group_col]]),
+    sep = "|")
+
+  screen_key <- paste(
+    screen$TaxonID,
+    normalize_group(screen$group),
+    sep = "|")
+
+  idx <- match(detection_key, screen_key)
+
+  stopifnot(
+    !anyDuplicated(detection_key),
+    !anyDuplicated(screen_key),
+    setequal(detection_key, screen_key),
+    !anyNA(idx),
+    all(detections$n_samples == screen$n_samples[idx]),
+    all(detections$n_zero == screen$n_zero[idx])
+  )
+
+  new_columns <- data.frame(
+    structural_zero_status = ifelse(
+      screen$structural_zero[idx], "Flagged", "Not flagged"),
+    n_detected_in_other_groups = screen$n_detected_elsewhere[idx]
+  )
+
+  openxlsx::writeData(
+    wb_combined, sheet, new_columns,
+    startCol = ncol(detections) + 1L)
+
+  openxlsx::setColWidths(
+    wb_combined, sheet,
+    cols = ncol(detections) + seq_len(ncol(new_columns)),
+    widths = "auto")
+}
+
+openxlsx::addWorksheet(wb_combined, "Structural_Zero_Summary")
+openxlsx::writeData(
+  wb_combined, "Structural_Zero_Summary", structural_zero_summary)
+openxlsx::freezePane(
+  wb_combined, "Structural_Zero_Summary", firstRow = TRUE)
+openxlsx::setColWidths(
+  wb_combined, "Structural_Zero_Summary",
+  cols = seq_len(ncol(structural_zero_summary)),
+  widths = "auto")
+
+# Add the structural-zero definition to the existing Definitions sheet
+definitions <- openxlsx::read.xlsx(input_file, sheet = "Definitions")
+
+openxlsx::writeData(
+  wb_combined, "Definitions",
+  data.frame(
+    Measure = "Structural-zero flag",
+    Definition = paste(
+      "No reads detected in any of the 18 animals in the group,",
+      "with detection in at least one animal in another group."
+    )
+  ),
+  startRow = nrow(definitions) + 2L,
+  colNames = FALSE
+)
+
+openxlsx::saveWorkbook(wb_combined, output_file, overwrite = TRUE)
+print(structural_zero_summary)
+```
+## Differential Prevalance (Nickols WA, Kuntz T, Shen J, et al. (2026) https://doi.org/10.1038/s41592-025-02923-9)
+```{r}
+# Main reason: Figuring out which taxon is detected more often in some groups after accounting for cohort and sequencing depth 
+
+# Set-up analysis 
+run_detection_prevalence <- function(
+  ps_obj,
+  ancom_obj,
+  rank_name
+) {
+
+# Original counts, with taxa in rows
+  counts <- as(phyloseq::otu_table(ps_obj), "matrix")
+
+  if (!phyloseq::taxa_are_rows(ps_obj)) {
+    counts <- t(counts)
+  }
+
+# Match the existing ANCOM-BC2 sample and taxon family
+  sample_ids <- colnames(ancom_obj$bias_correct_log_table)
+  taxon_ids <- as.character(ancom_obj$res$taxon)
+
+  metadata <- data.frame(
+    phyloseq::sample_data(ps_obj),
+    check.names = FALSE)
+
+  stopifnot(
+    length(sample_ids) > 0L,
+    length(taxon_ids) > 0L,
+    !anyDuplicated(sample_ids),
+    !anyDuplicated(taxon_ids),
+    all(sample_ids %in% colnames(counts)),
+    all(sample_ids %in% rownames(metadata)),
+    all(taxon_ids %in% rownames(counts)),
+    all(
+      c("treatment", "condition", "cohort") %in%
+        names(metadata)
+    )
+  )
+
+  counts <- counts[, sample_ids, drop = FALSE]
+  metadata <- metadata[sample_ids, , drop = FALSE]
+
+  stopifnot(
+    all(is.finite(counts)),
+    all(counts >= 0)
+  )
+
+# Calculate library size before selecting the fitted taxa
+  library_sizes <- colSums(counts)
+  stopifnot(all(library_sizes > 0))
+  counts <- counts[taxon_ids, , drop = FALSE]
+
+# Preserve the original reference groups
+  metadata$treatment <- factor(
+    trimws(as.character(metadata$treatment)),
+    levels = c("bbs", "maurum")
+  )
+
+  metadata$condition <- factor(
+    trimws(as.character(metadata$condition)),
+    levels = c("HC", "IS")
+  )
+
+  metadata$cohort <- factor(
+    trimws(as.character(metadata$cohort))
+  )
+
+  stopifnot(
+    !anyNA(metadata[, c("treatment", "condition", "cohort")])
+  )
+
+# Explicit treatment contrasts
+  contrasts(metadata$treatment) <- stats::contr.treatment(
+    levels(metadata$treatment)
+  )
+
+  contrasts(metadata$condition) <- stats::contr.treatment(
+    levels(metadata$condition)
+  )
+
+# Sequencing-depth covariate
+  log_depth <- log10(library_sizes)
+  depth_sd <- stats::sd(log_depth)
+
+  if (!is.finite(depth_sd) || depth_sd == 0) {
+    stop(
+      "Sequencing depth has no variation; review the depth covariate."
+    )
+  }
+
+  metadata$log_read_depth <- as.numeric(
+    scale(log_depth)
+  )
+
+# Taxonomic names for reporting
+  taxonomy <- as(
+    phyloseq::tax_table(ps_obj),
+    "matrix"
+  )
+
+  stopifnot(
+    rank_name %in% colnames(taxonomy),
+    all(taxon_ids %in% rownames(taxonomy))
+  )
+
+  taxon_names <- as.character(
+    taxonomy[taxon_ids, rank_name]
+  )
+
+  if (rank_name == "Phylum") {
+    taxon_names <- update_phylum_names(taxon_names)
+  }
+
+  taxon_names <- gsub("\\[|\\]", "", taxon_names)
+
+  taxon_names[
+    is.na(taxon_names) | trimws(taxon_names) == ""
+  ] <- "Unclassified"
+
+# Detection counts retain every fitted sample
+  n_detected <- rowSums(counts > 0)
+  taxon_status <- data.frame(
+    taxonomic_level = rank_name,
+    TaxonID = taxon_ids,
+    taxon_name = taxon_names,
+    n_samples = ncol(counts),
+    n_detected = unname(n_detected),
+    n_zero = ncol(counts) - unname(n_detected),
+    detection_pattern = ifelse(
+      n_detected == 0,
+      "Never detected",
+      ifelse(
+        n_detected == ncol(counts),
+        "Detected in every sample",
+        "Variable detection"
+      )
+    ),
+    stringsAsFactors = FALSE
+  )
+
+# Constant detection outcomes cannot provide a prevalence test.These taxa remain documented in taxon_status.
+  variable_detection <- (
+    n_detected > 0 &
+      n_detected < ncol(counts)
+  )
+
+  if (!any(variable_detection)) {
+    return(
+      list(
+        fit = NULL,
+        results = data.frame(),
+        taxon_status = taxon_status,
+        software_version = as.character(
+          packageVersion("maaslin3")
+        )
+      )
+    )
+  }
+
+# Binary response:0 reads = 0; every positive count = 1
+  feature_data <- data.frame(
+    t(
+      1L * (
+        counts[variable_detection, , drop = FALSE] > 0
+      )
+    ),
+    check.names = FALSE
+  )
+
+# Prefix identifiers to give each feature a valid R name
+  colnames(feature_data) <- paste0(
+    "taxon_",
+    taxon_ids[variable_detection]
+  )
+
+  stopifnot(
+    identical(
+      rownames(feature_data),
+      rownames(metadata)
+    )
+  )
+
+# Specify the factorial model with cohort blocking
+  model_formulas <- maaslin3::maaslin_check_formula(
+    data = feature_data,
+    metadata = metadata,
+    input_formula = paste(
+      "~ treatment * condition +",
+      "log_read_depth + (1 | cohort)"
+    )
+  )
+
+  set.seed(1234)
+
+# Encode non-detection as NA in the copy passed to MaAsLin 3.
+# The package converts these NAs to 0 for the logistic model.
+stopifnot(all(as.matrix(feature_data) %in% c(0L, 1L)))
+
+prevalence_input <- feature_data
+prevalence_input[prevalence_input == 0L] <- NA_integer_
+
+# Every taxon being modeled should have both detections and non-detections.
+stopifnot(
+  all(colSums(!is.na(prevalence_input)) > 0L),
+  all(colSums(is.na(prevalence_input)) > 0L)
+)
+
+prevalence_fit <- maaslin3::maaslin_fit(
+  filtered_data = prevalence_input,
+  transformed_data = prevalence_input,
+  metadata = metadata,
+  formula = model_formulas$formula,
+  random_effects_formula = model_formulas$random_effects_formula,
+  zero_threshold = 0,
+  evaluate_only = "prevalence",
+  augment = TRUE,
+  small_random_effects = FALSE,
+  median_comparison_abundance = FALSE,
+  median_comparison_prevalence = FALSE,
+  warn_prevalence = FALSE,
+  correction = "BH",
+  max_significance = 0.05,
+  save_models = FALSE
+)
+
+# Extract results AFTER fitting the models
+  results <- as.data.frame(
+    prevalence_fit$fit_data_prevalence$results)
+
+# Preserve native columns and provide reporting aliases
+  if (
+    all(
+      c("pval_individual", "qval_individual") %in%
+        names(results)
+    )
+  ) {
+    results$pval <- results$pval_individual
+    results$qval <- results$qval_individual
+  }
+
+# Validate the reporting columns
+  required_columns <- c(
+    "feature",
+    "coef",
+    "pval",
+    "qval",
+    "error"
+  )
+
+  missing_columns <- setdiff(
+    required_columns,
+    names(results)
+  )
+
+  if (length(missing_columns) > 0L) {
+    stop(
+      paste0(
+        "Missing prevalence-result columns: ",
+        paste(missing_columns, collapse = ", "),
+        ". Returned columns: ",
+        paste(names(results), collapse = ", ")
+      )
+    )
+  }
+
+# Restore original taxon identifiers
+  results$TaxonID <- sub(
+    "^taxon_",
+    "",
+    as.character(results$feature)
+  )
+
+  stopifnot(
+    all(results$TaxonID %in% taxon_status$TaxonID)
+  )
+
+# Add taxonomy, detection counts, and reporting status
+  results <- results %>%
+    dplyr::left_join(
+      taxon_status,
+      by = "TaxonID"
+    ) %>%
+    dplyr::mutate(
+      model_status = dplyr::case_when(
+        !is.na(error) & nzchar(as.character(error)) ~
+          "Review model diagnostic",
+        !is.finite(coef) | !is.finite(pval) ~
+          "No valid test",
+        TRUE ~ "Fitted"
+      ),
+      significant_fdr_0.05 = dplyr::if_else(
+        model_status == "Fitted" & is.finite(qval),
+        qval < 0.05,
+        NA
+      )
+    ) %>%
+    dplyr::relocate(
+      taxonomic_level,
+      taxon_name,
+      TaxonID,
+      model_status,
+      .before = feature
+    )
+
+# Return the fitted object and reporting tables
+  list(
+    fit = prevalence_fit,
+    results = results,
+    taxon_status = taxon_status,
+    software_version = as.character(
+      packageVersion("maaslin3")
+    )
+  )
+}
+```
+### Differential Prevalence- Analysis 
+```{r}
+# Phylum prevalence analysis
+phylum_prevalence_filtered <- run_detection_prevalence(
+  ps_obj = ps_phylum,
+  ancom_obj = ancom2_phylum_filtered_BH,
+  rank_name = "Phylum")
+
+# Genus prevalence analysis
+genus_prevalence_filtered <- run_detection_prevalence(
+  ps_obj = ps_genus,
+  ancom_obj = ancom2_genus_filtered_BH,
+  rank_name = "Genus")
+```
+### Differential Prevalence- Make tables and export for manuscript (Supplement table S7)
+```{r}
+make_prevalence_publication_table <- function(prevalence_obj) {
+  x <- as.data.frame(prevalence_obj$results)
+
+  if (nrow(x) == 0L) {
+    x <- data.frame(
+      taxonomic_level = character(),
+      taxon_name = character(),
+      TaxonID = character(),
+      name = character(),
+      coef = numeric(),
+      stderr = numeric(),
+      pval = numeric(),
+      qval = numeric(),
+      model_status = character(),
+      error = character(),
+      n_samples = integer(),
+      n_detected = integer(),
+      n_zero = integer()
+    )
+  }
+
+  x %>%
+    dplyr::transmute(
+      taxonomic_level,
+      taxon_name,
+      comparison = dplyr::case_when(
+        name == "treatmentmaurum" ~ "Treatment (HC)",
+        name == "conditionIS" ~ "Condition (BBS)",
+        name %in% c(
+          "treatmentmaurum:conditionIS",
+          "conditionIS:treatmentmaurum"
+        ) ~ "Treatment x condition",
+        name == "log_read_depth" ~ "Sequencing depth",
+        TRUE ~ as.character(name)
+      ),
+      model_term = as.character(name),
+      log_odds_coefficient = coef,
+      standard_error = stderr,
+      p_value = pval,
+      fdr_q_value = qval,
+      significant_fdr_0.05 = dplyr::case_when(
+        !(model_status %in% "Fitted") |
+          !is.finite(pval) | !is.finite(qval) ~ "Review",
+        qval < 0.05 ~ "Yes",
+        TRUE ~ "No"
+      ),
+      model_status,
+      model_diagnostic = as.character(error),
+      n_samples,
+      n_detected,
+      n_zero,
+      TaxonID
+    ) %>%
+    dplyr::arrange(comparison, fdr_q_value, taxon_name)
+}
+
+phylum_prevalence_table <- make_prevalence_publication_table(
+  phylum_prevalence_filtered
+)
+
+genus_prevalence_table <- make_prevalence_publication_table(
+  genus_prevalence_filtered
+)
+
+stopifnot(
+  nrow(phylum_prevalence_table) == 8L,
+  nrow(genus_prevalence_table) == 248L
+)
+
+prevalence_summary <- dplyr::bind_rows(
+  phylum_prevalence_table,
+  genus_prevalence_table
+) %>%
+  dplyr::group_by(taxonomic_level, comparison) %>%
+  dplyr::summarise(
+    n_taxa = dplyr::n_distinct(TaxonID),
+    n_tests = dplyr::n(),
+    n_evaluable = sum(significant_fdr_0.05 %in% c("Yes", "No")),
+    n_significant = sum(significant_fdr_0.05 == "Yes"),
+    n_for_review = sum(significant_fdr_0.05 == "Review"),
+    .groups = "drop"
+  )
+
+prevalence_taxon_status <- dplyr::bind_rows(
+  phylum_prevalence_filtered$taxon_status,
+  genus_prevalence_filtered$taxon_status
+) %>%
+  dplyr::mutate(
+    prevalence_percent = 100 * n_detected / n_samples,
+    test_status = dplyr::if_else(
+      n_detected > 0 & n_detected < n_samples,
+      "Submitted to prevalence model",
+      "Not tested: no detection variation"
+    )
+  ) %>%
+  dplyr::arrange(taxonomic_level, taxon_name, TaxonID)
+
+prevalence_methods <- tibble::tribble(
+  ~Setting, ~Description,
+  "Model",
+  "Logistic mixed model: detection ~ treatment * condition + log_read_depth + (1 | cohort). Data augmentation was enabled.",
+  "Treatment (HC)",
+  "M. aurum versus BBS.",
+  "Condition (BBS)",
+  "IS versus HC.",
+  "Treatment x condition",
+  "Change in the M. aurum-versus-BBS log-odds contrast under IS compared with HC.",
+  "Sequencing depth",
+  "Standardized log10 library size, calculated using all reads in the original count table before selecting taxa.",
+  "Detection definition",
+  "At least one read indicates detection. The 0.01% pooled filter selected taxa for analysis; it was not used as a within-sample detection threshold.",
+  "Taxon and sample scope",
+  "All 72 animals and the 6 phyla and 85 genera returned by the filtered ANCOM-BC2 fits were considered. Of these, 2 phyla and 62 genera had variable detection and were modeled.",
+  "Constant detection",
+  "Taxa with no detection variation were not tested and are listed in Taxon_Status.",
+  "P-values and FDR",
+  "Individual p-values and BH q-values were retained from each rank-specific MaAsLin 3 fit. The adjustment included sequencing-depth associations. The reporting threshold was q < 0.05.",
+  "Interpretation",
+  "The models assess observed detection. Screening for prevalence associations potentially induced by abundance differences was disabled (warn_prevalence = FALSE).",
+  "Diagnostics",
+  "Model diagnostics were retained from MaAsLin 3. Rows with a diagnostic or nonfinite p- or q-value are marked Review.",
+  "Phylum MaAsLin 3 version",
+  as.character(phylum_prevalence_filtered$software_version),
+  "Genus MaAsLin 3 version",
+  as.character(genus_prevalence_filtered$software_version),
+  "Reference",
+  "Nickols WA, Kuntz T, Shen J, et al. (2026). MaAsLin 3. Nature Methods 23:554–564. https://doi.org/10.1038/s41592-025-02923-9"
+)
+
+prevalence_export_tables <- list(
+  Summary = prevalence_summary,
+  Phylum_Prevalence = phylum_prevalence_table,
+  Genus_Prevalence = genus_prevalence_table,
+  Taxon_Status = prevalence_taxon_status,
+  Methods = prevalence_methods
+)
+
+print(prevalence_summary, n = Inf)
+
+
+# Worksheets to export
+prevalence_export_tables <- list(
+  Summary = prevalence_summary,
+  Phylum_Prevalence = phylum_prevalence_table,
+  Genus_Prevalence = genus_prevalence_table,
+  Taxon_Status = prevalence_taxon_status,
+  Methods = prevalence_methods
+)
+
+# Create a separate workbook
+prevalence_wb <- openxlsx::createWorkbook()
+
+prevalence_header_style <- openxlsx::createStyle(
+  textDecoration = "bold",
+  wrapText = TRUE,
+  valign = "center"
+)
+
+prevalence_decimal_style <- openxlsx::createStyle(
+  numFmt = "0.000"
+)
+
+prevalence_probability_style <- openxlsx::createStyle(
+  numFmt = "0.000E+00"
+)
+
+prevalence_count_style <- openxlsx::createStyle(
+  numFmt = "#,##0"
+)
+
+prevalence_percent_style <- openxlsx::createStyle(
+  numFmt = '0.00"%"'
+)
+
+for (sheet_name in names(prevalence_export_tables)) {
+
+  sheet_data <- as.data.frame(
+    prevalence_export_tables[[sheet_name]]
+  )
+
+  openxlsx::addWorksheet(
+    prevalence_wb,
+    sheetName = sheet_name,
+    gridLines = FALSE
+  )
+
+  openxlsx::writeData(
+    prevalence_wb,
+    sheet = sheet_name,
+    x = sheet_data,
+    rowNames = FALSE,
+    headerStyle = prevalence_header_style,
+    withFilter = (
+      nrow(sheet_data) > 0L &&
+        sheet_name != "Methods"
+    ),
+    keepNA = TRUE,
+    na.string = "NA"
+  )
+
+  openxlsx::freezePane(
+    prevalence_wb,
+    sheet = sheet_name,
+    firstRow = TRUE
+  )
+
+  openxlsx::setColWidths(
+    prevalence_wb,
+    sheet = sheet_name,
+    cols = seq_len(ncol(sheet_data)),
+    widths = pmin(
+      38,
+      pmax(16, nchar(names(sheet_data)) + 2)
+    )
+  )
+
+  openxlsx::setRowHeights(
+    prevalence_wb,
+    sheet = sheet_name,
+    rows = 1,
+    heights = 36
+  )
+
+# Display formatting preserves underlying numerical precision
+  if (nrow(sheet_data) > 0L) {
+
+    data_rows <- seq_len(nrow(sheet_data)) + 1L
+
+    format_groups <- list(
+      decimal = which(
+        names(sheet_data) %in%
+          c("log_odds_coefficient", "standard_error")
+      ),
+      probability = which(
+        names(sheet_data) %in%
+          c("p_value", "fdr_q_value")
+      ),
+      count = grep("^n_", names(sheet_data)),
+      percent = which(
+        names(sheet_data) == "prevalence_percent"
+      )
+    )
+
+    format_styles <- list(
+      decimal = prevalence_decimal_style,
+      probability = prevalence_probability_style,
+      count = prevalence_count_style,
+      percent = prevalence_percent_style
+    )
+
+    for (format_name in names(format_groups)) {
+
+      columns <- format_groups[[format_name]]
+
+      if (length(columns) > 0L) {
+        openxlsx::addStyle(
+          prevalence_wb,
+          sheet = sheet_name,
+          style = format_styles[[format_name]],
+          rows = data_rows,
+          cols = columns,
+          gridExpand = TRUE,
+          stack = TRUE
+        )
+      }
+    }
+
+# Wrap taxon names and diagnostic messages
+    text_columns <- which(
+      names(sheet_data) %in%
+        c("taxon_name", "model_diagnostic", "test_status")
+    )
+
+    if (length(text_columns) > 0L) {
+      openxlsx::addStyle(
+        prevalence_wb,
+        sheet = sheet_name,
+        style = openxlsx::createStyle(
+          wrapText = TRUE,
+          valign = "top"
+        ),
+        rows = data_rows,
+        cols = text_columns,
+        gridExpand = TRUE,
+        stack = TRUE
+      )
+
+      openxlsx::setRowHeights(
+        prevalence_wb,
+        sheet = sheet_name,
+        rows = data_rows,
+        heights = 45
+      )
+    }
+  }
+}
+
+# Format the methods and references
+openxlsx::setColWidths(
+  prevalence_wb,
+  sheet = "Methods",
+  cols = 1:2,
+  widths = c(32, 110)
+)
+
+openxlsx::addStyle(
+  prevalence_wb,
+  sheet = "Methods",
+  style = openxlsx::createStyle(
+    wrapText = TRUE,
+    valign = "top"
+  ),
+  rows = seq_len(nrow(prevalence_methods)) + 1L,
+  cols = 1:2,
+  gridExpand = TRUE,
+  stack = TRUE
+)
+
+openxlsx::setRowHeights(
+  prevalence_wb,
+  sheet = "Methods",
+  rows = seq_len(nrow(prevalence_methods)) + 1L,
+  heights = 60
+)
+
+# Save the workbook
+dir.create(
+  "R_tables",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+prevalence_export_file <-
+  "R_tables/Maurum_differential_prevalence_filtered_BH.xlsx"
+
+openxlsx::saveWorkbook(
+  prevalence_wb,
+  file = prevalence_export_file,
+  overwrite = TRUE
+)
+```
+###############################################################################
+# Archived Code
+###############################################################################
+## Statistical Analysis: Post-hoc Fisher's LSD 
+```{r}
+# Which which factors are driving the treatment x stress interaction
+select_significant_interactions <- function(interaction_table) {
+  interaction_table %>%
+    dplyr::filter(
+      !is.na(fdr_q_value),
+      fdr_q_value < 0.05,
+      # Incorporate ANCOM-BC2 sensitivity analysis
+      !is.na(passed_sensitivity),
+      passed_sensitivity == TRUE
+    ) %>%
+    dplyr::distinct(
+      TaxonID,
+      taxon_name,
+      .keep_all = TRUE
+    ) %>%
+    dplyr::transmute(
+      TaxonID,
+      taxon_name,
+      parent_interaction_lfc =
+        log_fold_change,
+      parent_interaction_p =
+        p_value,
+      parent_interaction_q =
+        fdr_q_value,
+      parent_passed_sensitivity =
+        passed_sensitivity)
+}
+
+significant_phylum_interactions <-
+  select_significant_interactions(
+    phylum_interaction_table)
+
+significant_genus_interactions <-
+  select_significant_interactions(
+    genus_interaction_table)
+
+
+# Post-hoc screening for treatment x stress interaction 
+# Fisher's LSD post-hoc testing will only be performed when:
+#   1. ANCOM-BC2 interaction FDR q < 0.05
+#   2. ANCOM-BC2 pseudo-count sensitivity analysis is passed
+# If either criterion is not met, no interaction-specific
+# Fisher's LSD follow-up is performed.
+
+add_posthoc_screening <- function(interaction_table) {
+  interaction_table %>%
+    dplyr::mutate(
+
+# Post-hoc eligibility
+      posthoc_eligible = dplyr::case_when(
+
+        !is.na(fdr_q_value) &
+          fdr_q_value < 0.05 &
+          !is.na(passed_sensitivity) &
+          passed_sensitivity == TRUE ~
+          "Yes",
+        TRUE ~
+          "No"),
+
+# Explain why a taxon did or did not proceed
+  posthoc_status = dplyr::case_when(
+        is.na(fdr_q_value) ~
+          "No post-hoc: FDR q-value unavailable",
+        fdr_q_value >= 0.05 ~
+          "No post-hoc: interaction not FDR-significant",
+        fdr_q_value < 0.05 &
+          (is.na(passed_sensitivity) | passed_sensitivity != TRUE) ~
+          "No post-hoc: sensitivity criterion not passed",
+        fdr_q_value < 0.05 &
+          passed_sensitivity == TRUE ~
+          "Fisher LSD post-hoc indicated",
+        TRUE ~ "No post-hoc"))
+}
+
+# Apply post-hoc screening 
+phylum_interaction_table <- add_posthoc_screening(
+  phylum_interaction_table)
+
+genus_interaction_table <- add_posthoc_screening(
+  genus_interaction_table)
+
+# Identify taxa eligible for Fisher's LSD 
+significant_phylum_interactions <-
+  phylum_interaction_table %>%
+  dplyr::filter(
+    posthoc_eligible == "Yes")
+
+significant_genus_interactions <-
+  genus_interaction_table %>%
+  dplyr::filter(
+    posthoc_eligible == "Yes")
+
+# Post-hoc screening summary 
+make_posthoc_summary <- function(
+  interaction_table,
+  rank_name
+) {
+
+  tibble::tibble(
+    taxonomic_level =
+    rank_name,
+    effect =
+      "Treatment x Stress interaction",
+    screening_criterion =
+      "ANCOM-BC2 FDR q < 0.05 and sensitivity passed",
+    total_taxa_tested =
+      nrow(interaction_table),
+    nominal_p_less_0.05 =
+      sum(
+        !is.na(interaction_table$p_value) &
+          interaction_table$p_value < 0.05),
+    fdr_q_less_0.05 =
+      sum(
+        !is.na(interaction_table$fdr_q_value) &
+          interaction_table$fdr_q_value < 0.05),
+    sensitivity_passed =
+      sum(
+        !is.na(interaction_table$passed_sensitivity) &
+          interaction_table$passed_sensitivity == TRUE),
+    eligible_for_posthoc =
+      sum(
+        interaction_table$posthoc_eligible == "Yes",
+        na.rm = TRUE),
+    fisher_lsd_posthoc_performed =
+      dplyr::if_else(
+        sum(
+          interaction_table$posthoc_eligible == "Yes",
+          na.rm = TRUE
+        ) > 0,
+        "Yes",
+        "No"))
+}
+
+phylum_posthoc_summary <- make_posthoc_summary(
+  phylum_interaction_table,"Phylum")
+
+genus_posthoc_summary <- make_posthoc_summary(
+  genus_interaction_table,"Genus")
+
+posthoc_screening_summary <- dplyr::bind_rows(
+  phylum_posthoc_summary, genus_posthoc_summary)
+
+# Update ANCOMB-BC2 table with post-hoc summary results 
+ancombc2_publication_table <- dplyr::bind_rows(
+  phylum_treatment_table,
+  phylum_condition_table,
+  phylum_interaction_table,
+  genus_treatment_table,
+  genus_condition_table,
+  genus_interaction_table)
+
+# Export updated ANCOM-BC table to Excel
+dir.create(
+  "R_tables",
+  showWarnings = FALSE
+)
+
+wb <- openxlsx::createWorkbook()
+
+openxlsx::addWorksheet(
+  wb,
+  "Phylum_Treatment")
+
+openxlsx::writeData(
+  wb,
+  "Phylum_Treatment",
+  phylum_treatment_table)
+
+openxlsx::addWorksheet(
+  wb,
+  "Phylum_Condition")
+
+openxlsx::writeData(
+  wb,
+  "Phylum_Condition",
+  phylum_condition_table)
+
+openxlsx::addWorksheet(
+  wb,
+  "Phylum_Interaction")
+
+openxlsx::writeData(
+  wb,
+  "Phylum_Interaction",
+  phylum_interaction_table)
+
+openxlsx::addWorksheet(
+  wb,
+  "Genus_Treatment")
+
+openxlsx::writeData(
+  wb,
+  "Genus_Treatment",
+  genus_treatment_table)
+
+openxlsx::addWorksheet(
+  wb,
+  "Genus_Condition")
+
+openxlsx::writeData(
+  wb,
+  "Genus_Condition",
+  genus_condition_table)
+
+openxlsx::addWorksheet(
+  wb,
+  "Genus_Interaction")
+
+openxlsx::writeData(
+  wb,
+  "Genus_Interaction",
+  genus_interaction_table)
+
+openxlsx::addWorksheet(
+  wb,
+  "PostHoc_Screening")
+
+openxlsx::writeData(
+  wb,
+  "PostHoc_Screening",
+  posthoc_screening_summary)
+
+openxlsx::addWorksheet(
+  wb,
+  "Combined")
+
+openxlsx::writeData(
+  wb,
+  "Combined",
+  ancombc2_publication_table)
+
+
+# Excel format
+header_style <- openxlsx::createStyle(
+  textDecoration = "bold",
+  fgFill = "#D9EAF7",
+  border = "Bottom")
+
+for (sheet in names(wb)) {
+  sheet_data <- openxlsx::readWorkbook(
+    wb, sheet = sheet)
+
+  openxlsx::addStyle(
+    wb,
+    sheet,
+    style = header_style,
+    rows = 1,
+    cols = 1:ncol(sheet_data),
+    gridExpand = TRUE)
+
+  openxlsx::freezePane(
+    wb,
+    sheet,
+    firstRow = TRUE)
+
+  openxlsx::setColWidths(
+    wb,
+    sheet,
+    cols = 1:ncol(sheet_data),
+    widths = "auto")
+}
+
+wrap_style <- openxlsx::createStyle(
+  wrapText = TRUE,
+  valign = "top")
+
+# Wrap the PostHoc_Screening worksheet
+openxlsx::addStyle(
+  wb,
+  sheet = "PostHoc_Screening",
+  style = wrap_style,
+  rows = 2:(
+    nrow(posthoc_screening_summary) + 1),
+  cols = 1:ncol(posthoc_screening_summary),
+  gridExpand = TRUE)
+
+# Save the excel sheet 
+openxlsx::saveWorkbook(
+  wb,
+  file =
+    "R_tables/ANCOMBC2_2x2_factorial_phylum_genus_with_posthoc_screening.xlsx",
+  overwrite = TRUE)
+
+```
